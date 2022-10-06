@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.4.32916.344
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TQArchive-Wrapper", "TQArchive-Wrapper.csproj", "{7BEF8135-0ADE-467C-8E42-09885CB66AD2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WrapperTest", "..\WrapperTest\WrapperTest.csproj", "{FC8D554C-C76E-4975-8F2A-405FB4A52BF3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7BEF8135-0ADE-467C-8E42-09885CB66AD2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7BEF8135-0ADE-467C-8E42-09885CB66AD2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7BEF8135-0ADE-467C-8E42-09885CB66AD2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7BEF8135-0ADE-467C-8E42-09885CB66AD2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FC8D554C-C76E-4975-8F2A-405FB4A52BF3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FC8D554C-C76E-4975-8F2A-405FB4A52BF3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FC8D554C-C76E-4975-8F2A-405FB4A52BF3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FC8D554C-C76E-4975-8F2A-405FB4A52BF3}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {6AB87B32-2A7C-42BD-B455-EEDE67C8F299}
+	EndGlobalSection
+EndGlobal

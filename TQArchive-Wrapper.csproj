@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <RootNamespace>TQArchive_Wrapper</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Authors>ByteSquire</Authors>
+    <Company></Company>
+    <Product />
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+</Project>
