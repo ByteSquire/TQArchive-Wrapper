@@ -48,6 +48,8 @@ namespace TQArchive_Wrapper
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             };
 
             foreach (var arg in args)
