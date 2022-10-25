@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<TargetFramework>net6.0</TargetFramework>
@@ -6,14 +6,15 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<Authors>ByteSquire</Authors>
-		<Company></Company>
-		<Product />
+		<Company>ByteSquire.tq</Company>
+		<Product>TQArchive-Wrapper</Product>
 		<Version>1.1.0</Version>
+		<PackageId>$(Company).$(Product)</PackageId>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<PackageReference Include="System.Text.Encoding.CodePages" Version="6.0.0" />
-		<PackageReference Include="TQDB-Parser" Version="1.2.2" />
+		<PackageReference Include="ByteSquire.tq.TQDB-Parser" Version="1.2.3" />
 	</ItemGroup>
 
 </Project>
