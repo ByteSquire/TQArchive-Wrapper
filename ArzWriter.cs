@@ -7,31 +7,22 @@ using System.IO.Compression;
 using TQDB_Parser.DBR;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using TQDB_Parser.Extensions;
 
 namespace TQArchive_Wrapper
 {
     public class ArzWriter
     {
         private readonly string filePath;
-        private readonly Encoding enc1252;
-        private readonly IFormatProvider invariant;
         private readonly ILogger? logger;
 
         public ArzWriter(string filePath, ILogger? logger = null)
         {
             this.filePath = Path.GetFullPath(filePath);
-            var encoding = CodePagesEncodingProvider.Instance.GetEncoding(1252);
-            if (encoding is null)
-                throw new Exception("Could not load Windows-1252 encoding");
-            enc1252 = encoding;
-            invariant = CultureInfo.InvariantCulture;
             this.logger = logger;
             if (!File.Exists(filePath))
                 File.Create(filePath).Dispose();
         }
-
-        private const int headerStart = 0x30004;
-        private const int dbrBaseOffset = 24;
 
         public event Action<string>? FileDone;
 
@@ -105,38 +96,43 @@ namespace TQArchive_Wrapper
                     for (var i = 0; i < numElements; i++)
                     {
                         var element = arraySplit[i];
-                        try
+
+                        switch (entry.Template.Type)
                         {
-                            switch (entry.Template.Type)
-                            {
-                                case TQDB_Parser.VariableType.@int:
-                                case TQDB_Parser.VariableType.@bool:
+                            case TQDB_Parser.VariableType.@int:
+                            case TQDB_Parser.VariableType.@bool:
+                                {
+                                    if (TQNumberString.TryParseTQString(element, out int iVal))
+                                        values[i] = iVal;
+                                    else
                                     {
-                                        values[i] = int.Parse(element, invariant);
-                                        break;
+                                        logger?.LogError("{value} is not a valid int", element);
+                                        error = true;
                                     }
-                                case TQDB_Parser.VariableType.real:
+                                    break;
+                                }
+                            case TQDB_Parser.VariableType.real:
+                                {
+                                    if (TQNumberString.TryParseTQString(element, out float fVal))
+                                        values[i] = fVal;
+                                    else
                                     {
-                                        values[i] = float.Parse(element, invariant);
-                                        break;
+                                        logger?.LogError("{value} is not a valid float", element);
+                                        error = true;
                                     }
-                                case TQDB_Parser.VariableType.file:
-                                    {
-                                        values[i] = AddStrGetIndex(strEntries, element);
-                                        break;
-                                    }
-                                case TQDB_Parser.VariableType.@string:
-                                case TQDB_Parser.VariableType.equation:
-                                    {
-                                        values[i] = AddStrGetIndex(strEntries, element, false);
-                                        break;
-                                    }
-                            }
-                        }
-                        catch (FormatException e)
-                        {
-                            logger?.LogError(e, "{value}", element);
-                            error = true;
+                                    break;
+                                }
+                            case TQDB_Parser.VariableType.file:
+                                {
+                                    values[i] = AddStrGetIndex(strEntries, element);
+                                    break;
+                                }
+                            case TQDB_Parser.VariableType.@string:
+                            case TQDB_Parser.VariableType.equation:
+                                {
+                                    values[i] = AddStrGetIndex(strEntries, element, false);
+                                    break;
+                                }
                         }
                     }
                     // could consider skipping single entries in an array
@@ -166,7 +162,7 @@ namespace TQArchive_Wrapper
                 var currDBRClass = file["Class"].Value;
 
                 WriteValue(dbrEntries, currDBRNameID);
-                WriteString(dbrEntries, currDBRClass, enc1252);
+                WriteString(dbrEntries, currDBRClass);
                 WriteValue(dbrEntries, dbrOffset);
                 // compressed size
                 WriteValue(dbrEntries, currDBRLength);
@@ -181,7 +177,7 @@ namespace TQArchive_Wrapper
 
             // database entries table header
             int dbtableStart = (int)binaryValuesStream.Length;
-            dbtableStart += dbrBaseOffset; // add 24 bytes header
+            dbtableStart += ArzHeader.DBTableBaseOffset; // add 24 bytes for header
 
             dbrEntries.Flush();
             // database record files header
@@ -190,7 +186,16 @@ namespace TQArchive_Wrapper
 
             // string table header
             int strtableStart = dbtableStart + dbbyteSize;
-            int strbyteSize = strEntries.Sum(x => enc1252.GetBytes(x.Key).Length + 4); // (4 bytes) int32 for length of string
+            int strbyteSize = strEntries.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4); // (4 bytes) int32 for length of string
+
+            var arzHeader = new ArzHeader
+            {
+                DBTableStart = dbtableStart,
+                DBByteSize = dbbyteSize,
+                DBNumEntries = dbnumEntries,
+                StrTableStart = strtableStart,
+                StrTableByteSize = strbyteSize,
+            };
 
             int strnumEntries = strEntries.Count;
             strbyteSize += BitConverter.GetBytes(strnumEntries).Length; // add length of numentries
@@ -198,25 +203,16 @@ namespace TQArchive_Wrapper
             try
             {
                 using var stream = new FileStream(filePath, FileMode.Truncate, FileAccess.Write, FileShare.None);
-                using var writer = new BinaryWriter(stream, enc1252, leaveOpen: true);
-                // first int32 is constant
-                writer.Write(headerStart);
+                using var writer = new BinaryWriter(stream, Constants.Encoding1252, leaveOpen: true);
 
-                // database table header
-                writer.Write(dbtableStart);
-                writer.Write(dbbyteSize);
-                writer.Write(dbnumEntries);
-
-                // string table header
-                writer.Write(strtableStart);
-                writer.Write(strbyteSize);
+                arzHeader.WriteTo(writer);
 
                 // database entries compressed
                 WriteMemoryStream(binaryValuesStream, stream);
                 // database record file infos
                 WriteMemoryStream(dbrEntries, stream);
                 // strings uncompressed
-                WriteStringTable(strEntries.Keys, strnumEntries, stream, enc1252);
+                WriteStringTable(strEntries.Keys, strnumEntries, stream);
             }
             catch (IOException e)
             {
@@ -266,7 +262,7 @@ namespace TQArchive_Wrapper
 
         private static void WriteString(Stream stream, string str, Encoding? encoding = null)
         {
-            encoding ??= Encoding.Default;
+            encoding ??= Constants.Encoding1252;
             var bytes = encoding.GetBytes(str);
             var len = bytes.Length;
             stream.Write(BitConverter.GetBytes(len));
