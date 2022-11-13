@@ -200,6 +200,9 @@ namespace TQArchive_Wrapper
             int strtableStart = dbtableStart + dbbyteSize;
             int strbyteSize = combinedStrEntries.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4); // (4 bytes) int32 for length of string
 
+            int strnumEntries = combinedStrEntries.Count;
+            strbyteSize += BitConverter.GetBytes(strnumEntries).Length; // add length of numentries
+
             var arzHeader = new ArzHeader
             {
                 DBTableStart = dbtableStart,
@@ -208,9 +211,6 @@ namespace TQArchive_Wrapper
                 StrTableStart = strtableStart,
                 StrTableByteSize = strbyteSize,
             };
-
-            int strnumEntries = combinedStrEntries.Count;
-            strbyteSize += BitConverter.GetBytes(strnumEntries).Length; // add length of numentries
 
             try
             {
