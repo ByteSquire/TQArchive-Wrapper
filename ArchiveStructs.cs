@@ -100,4 +100,11 @@ namespace TQArchive_Wrapper
             };
         }
     }
+
+    public struct RawDBRFile
+    {
+        public string FileName { get; set; }
+        public string TemplateName { get; set; }
+        public IReadOnlyDictionary<string, string> RawEntries { get; set; }
+    }
 }
