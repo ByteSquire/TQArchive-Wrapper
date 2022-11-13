@@ -8,6 +8,7 @@ using TQDB_Parser.DBR;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using TQDB_Parser.Extensions;
+using System.Collections.Concurrent;
 
 namespace TQArchive_Wrapper
 {
@@ -29,23 +30,20 @@ namespace TQArchive_Wrapper
         public void Write(IEnumerable<DBRFile> files)
         {
             //var strEntries = new List<string>();
-            var strEntries = new Dictionary<string, int>();
-            var dbrEntries = new MemoryStream();
+            var combinedStrEntries = new ConcurrentDictionary<string, int>();
+            var binaryEntries = new ConcurrentDictionary<DBRFileInfo, MemoryStream>();
 
-            using var binaryValuesStream = new MemoryStream();
-
-            var dbrOffset = 0;
-            foreach (var file in files)
+            Parallel.ForEach(files, file =>
             {
                 using var fileVarsStream = new MemoryStream();
                 // dbr file info
-                var currDBRNameID = AddStrGetIndex(strEntries, file.FilePath[file.FilePath.IndexOf("records")..]);
+                var currDBRNameID = AddStrGetIndex(combinedStrEntries, file.FilePath[file.FilePath.IndexOf("records")..]);
 
                 // write templateName as variable, it's excluded in DBRFile entries
                 WriteValue(fileVarsStream, (short)2);
                 WriteValue(fileVarsStream, (short)1);
-                WriteValue(fileVarsStream, AddStrGetIndex(strEntries, "templateName", false));
-                WriteValue(fileVarsStream, AddStrGetIndex(strEntries, file.TemplateRoot.FileName));
+                WriteValue(fileVarsStream, AddStrGetIndex(combinedStrEntries, "templateName", false));
+                WriteValue(fileVarsStream, AddStrGetIndex(combinedStrEntries, file.TemplateRoot.FileName));
 
                 // filter entries, eqnVariables are internal and includes should be resolved by now
                 var entries = file.Entries
@@ -62,7 +60,7 @@ namespace TQArchive_Wrapper
                 foreach (var entry in entries)
                 {
                     // name of the variable as int index in string table
-                    var stringID = AddStrGetIndex(strEntries, entry.Name, false);
+                    var stringID = AddStrGetIndex(combinedStrEntries, entry.Name, false);
 
                     bool isArray = entry.Template.Class == TQDB_Parser.VariableClass.array;
                     string[] arraySplit = new string[] { entry.Value };
@@ -124,13 +122,13 @@ namespace TQArchive_Wrapper
                                 }
                             case TQDB_Parser.VariableType.file:
                                 {
-                                    values[i] = AddStrGetIndex(strEntries, element);
+                                    values[i] = AddStrGetIndex(combinedStrEntries, element);
                                     break;
                                 }
                             case TQDB_Parser.VariableType.@string:
                             case TQDB_Parser.VariableType.equation:
                                 {
-                                    values[i] = AddStrGetIndex(strEntries, element, false);
+                                    values[i] = AddStrGetIndex(combinedStrEntries, element, false);
                                     break;
                                 }
                         }
@@ -153,40 +151,54 @@ namespace TQArchive_Wrapper
                     }
                 }
                 // compress the values using ZLib
-                using var binaryValuesWriter = new ZLibStream(binaryValuesStream, CompressionLevel.SmallestSize, true);
+                var myBinaryValuesStream = new MemoryStream();
+                using var binaryValuesWriter = new ZLibStream(myBinaryValuesStream, CompressionLevel.SmallestSize, true);
                 WriteMemoryStream(fileVarsStream, binaryValuesWriter);
                 binaryValuesWriter.Dispose();
 
                 // dbr file info
-                var currDBRLength = (int)binaryValuesStream.Length - dbrOffset;
+                var currDBRLength = (int)myBinaryValuesStream.Length;
                 var currDBRClass = file["Class"].Value;
-
-                WriteValue(dbrEntries, currDBRNameID);
-                dbrEntries.WriteCString(currDBRClass);
-                WriteValue(dbrEntries, dbrOffset);
-                // compressed size
-                WriteValue(dbrEntries, currDBRLength);
                 // timestap for comparison
-                var time = File.GetLastWriteTimeUtc(file.FilePath);
-                WriteValue(dbrEntries, time.ToFileTimeUtc());
+                var time = File.GetLastWriteTimeUtc(file.FilePath).ToFileTimeUtc();
 
-                dbrOffset += currDBRLength;
+                var fileInfo = new DBRFileInfo
+                {
+                    Class = currDBRClass,
+                    NameID = currDBRNameID,
+                    CompressedLength = currDBRLength,
+                    TimeStamp = time,
+                };
+
+                binaryEntries.TryAdd(fileInfo, myBinaryValuesStream);
 
                 FileDone?.Invoke(file.FilePath);
+            });
+            using var binaryValuesStream = new MemoryStream();
+            using var combinedDBREntries = new MemoryStream();
+            foreach (var binaryEntry in binaryEntries)
+            {
+                var entry = binaryEntry.Key;
+                entry.Offset = (int)binaryValuesStream.Position;
+                entry.WriteTo(combinedDBREntries);
+
+                var dbrEntry = binaryEntry.Value;
+                WriteMemoryStream(dbrEntry, binaryValuesStream);
+                dbrEntry.Dispose();
             }
 
             // database entries table header
             int dbtableStart = (int)binaryValuesStream.Length;
             dbtableStart += ArzHeader.DBTableBaseOffset; // add 24 bytes for header
 
-            dbrEntries.Flush();
+            combinedDBREntries.Flush();
             // database record files header
-            int dbbyteSize = (int)dbrEntries.Length;
+            int dbbyteSize = (int)combinedDBREntries.Length;
             int dbnumEntries = files.Count();
 
             // string table header
             int strtableStart = dbtableStart + dbbyteSize;
-            int strbyteSize = strEntries.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4); // (4 bytes) int32 for length of string
+            int strbyteSize = combinedStrEntries.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4); // (4 bytes) int32 for length of string
 
             var arzHeader = new ArzHeader
             {
@@ -197,7 +209,7 @@ namespace TQArchive_Wrapper
                 StrTableByteSize = strbyteSize,
             };
 
-            int strnumEntries = strEntries.Count;
+            int strnumEntries = combinedStrEntries.Count;
             strbyteSize += BitConverter.GetBytes(strnumEntries).Length; // add length of numentries
 
             try
@@ -210,9 +222,9 @@ namespace TQArchive_Wrapper
                 // database entries compressed
                 WriteMemoryStream(binaryValuesStream, stream);
                 // database record file infos
-                WriteMemoryStream(dbrEntries, stream);
+                WriteMemoryStream(combinedDBREntries, stream);
                 // strings uncompressed
-                WriteStringTable(strEntries.Keys, strnumEntries, stream);
+                WriteStringTable(combinedStrEntries.Keys, strnumEntries, stream);
             }
             catch (IOException e)
             {
@@ -220,17 +232,22 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private static int AddStrGetIndex(IDictionary<string, int> strings, string str, bool ignoreCase = true)
+        private readonly object stringDictionaryLock = new();
+
+        private int AddStrGetIndex(IDictionary<string, int> strings, string str, bool ignoreCase = true)
         {
             // ignoreCase can save a bit of size, ArtManager is really inconsistent
             if (ignoreCase)
                 str = str.ToLowerInvariant();
-            if (!strings.TryGetValue(str, out int idx))
+            lock (stringDictionaryLock)
             {
-                idx = strings.Count;
-                strings.Add(str, idx);
+                if (!strings.TryGetValue(str, out int idx))
+                {
+                    idx = strings.Count;
+                    strings.Add(str, idx);
+                }
+                return idx;
             }
-            return idx;
         }
 
         private static void WriteValue<T>(Stream writer, T value)
@@ -262,7 +279,9 @@ namespace TQArchive_Wrapper
 
         private static void WriteMemoryStream(MemoryStream input, Stream output)
         {
-            output.Write(input.ToArray());
+            input.Position = 0;
+            input.CopyTo(output);
+            //output.Write(input.ToArray());
         }
     }
 }
