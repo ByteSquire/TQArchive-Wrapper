@@ -8,11 +8,10 @@ namespace TQArchive_Wrapper
 {
     public static class BinaryReaderExtensions
     {
-        public static string ReadCString(this BinaryReader reader, int? length = null)
+        public static string ReadCString(this BinaryReader reader)
         {
-            length ??= reader.ReadInt32();
-
-            var stringBytes = reader.ReadBytes(length.Value);
+            var byteLength = reader.ReadInt32();
+            var stringBytes = reader.ReadBytes(byteLength);
             return Constants.Encoding1252.GetString(stringBytes);
         }
 

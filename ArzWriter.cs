@@ -162,7 +162,7 @@ namespace TQArchive_Wrapper
                 var currDBRClass = file["Class"].Value;
 
                 WriteValue(dbrEntries, currDBRNameID);
-                WriteString(dbrEntries, currDBRClass);
+                dbrEntries.WriteCString(currDBRClass);
                 WriteValue(dbrEntries, dbrOffset);
                 // compressed size
                 WriteValue(dbrEntries, currDBRLength);
@@ -252,21 +252,12 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private static void WriteStringTable(IEnumerable<string> entries, int numstrings, Stream stream, Encoding? encoding = null)
+        private static void WriteStringTable(IEnumerable<string> entries, int numstrings, Stream stream)
         {
             stream.Write(BitConverter.GetBytes(numstrings));
 
             foreach (var entry in entries)
-                WriteString(stream, entry, encoding);
-        }
-
-        private static void WriteString(Stream stream, string str, Encoding? encoding = null)
-        {
-            encoding ??= Constants.Encoding1252;
-            var bytes = encoding.GetBytes(str);
-            var len = bytes.Length;
-            stream.Write(BitConverter.GetBytes(len));
-            stream.Write(bytes);
+                stream.WriteCString(entry);
         }
 
         private static void WriteMemoryStream(MemoryStream input, Stream output)

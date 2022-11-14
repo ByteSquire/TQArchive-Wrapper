@@ -93,11 +93,18 @@ namespace TQArchive_Wrapper
             return new DBRFileInfo
             {
                 NameID = reader.ReadInt32(),
-                Class = reader.ReadString(),
+                Class = reader.ReadCString(),
                 Offset = reader.ReadInt32(),
                 CompressedLength = reader.ReadInt32(),
                 TimeStamp = reader.ReadInt64(),
             };
         }
+    }
+
+    public struct RawDBRFile
+    {
+        public string FileName { get; set; }
+        public string TemplateName { get; set; }
+        public IReadOnlyDictionary<string, string> RawEntries { get; set; }
     }
 }
