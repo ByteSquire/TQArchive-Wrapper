@@ -44,10 +44,10 @@ namespace TQArchive_Wrapper
             }
             else
             {
-                var parallelBinaryEntries = new List<(DBRFileInfo, MemoryStream)>();
-                binaryEntries = parallelBinaryEntries;
+                var linearBinaryEntries = new List<(DBRFileInfo, MemoryStream)>();
+                binaryEntries = linearBinaryEntries;
                 foreach (var file in files)
-                    WriteFile(file, parallelBinaryEntries.Add);
+                    WriteFile(file, linearBinaryEntries.Add);
             }
 
             using var binaryValuesStream = new MemoryStream();
