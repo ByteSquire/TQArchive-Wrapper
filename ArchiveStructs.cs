@@ -70,7 +70,7 @@ namespace TQArchive_Wrapper
         public void WriteTo(BinaryWriter writer)
         {
             writer.Write(NameID);
-            writer.Write(Class);
+            writer.BaseStream.WriteCString(Class);
             writer.Write(Offset);
             writer.Write(CompressedLength);
             writer.Write(TimeStamp);
