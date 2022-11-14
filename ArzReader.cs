@@ -104,14 +104,6 @@ namespace TQArchive_Wrapper
             lastStringOffset = stream.Position;
         }
 
-        private string GetStringAtPos(long pos, int length)
-        {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
-            stream.Seek(pos, SeekOrigin.Begin);
-            return reader.ReadCString(length);
-        }
-
         private void CheckStringID(int id)
         {
             if (id < 0 || numStrings > -1 && id >= numStrings)
