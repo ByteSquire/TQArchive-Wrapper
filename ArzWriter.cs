@@ -5,7 +5,6 @@ using System.Linq;
 using System.Text;
 using System.IO.Compression;
 using TQDB_Parser.DBR;
-using System.Globalization;
 using Microsoft.Extensions.Logging;
 using TQDB_Parser.Extensions;
 using System.Collections.Concurrent;
@@ -17,10 +16,14 @@ namespace TQArchive_Wrapper
         private readonly string filePath;
         private readonly ILogger? logger;
 
+        private readonly object stringDictionaryLock = new();
+        private readonly IDictionary<string, int> combinedStrings;
+
         public ArzWriter(string filePath, ILogger? logger = null)
         {
             this.filePath = Path.GetFullPath(filePath);
             this.logger = logger;
+            combinedStrings = new Dictionary<string, int>();
             if (!File.Exists(filePath))
                 File.Create(filePath).Dispose();
         }
@@ -30,20 +33,21 @@ namespace TQArchive_Wrapper
         public void Write(IEnumerable<DBRFile> files)
         {
             //var strEntries = new List<string>();
-            var combinedStrEntries = new ConcurrentDictionary<string, int>();
-            var binaryEntries = new ConcurrentDictionary<DBRFileInfo, MemoryStream>();
+            combinedStrings.Clear();
+            var binaryEntries = new ConcurrentBag<(DBRFileInfo, MemoryStream)>();
 
-            Parallel.ForEach(files, file =>
+            foreach (var file in files)
+            //Parallel.ForEach(files, file =>
             {
                 using var fileVarsStream = new MemoryStream();
-                // dbr file info
-                var currDBRNameID = AddStrGetIndex(combinedStrEntries, file.FilePath[file.FilePath.IndexOf("records")..]);
+
+                var fileNameID = AddStrGetIndex(file.FilePath[file.FilePath.IndexOf("records")..]);
 
                 // write templateName as variable, it's excluded in DBRFile entries
                 WriteValue(fileVarsStream, (short)2);
                 WriteValue(fileVarsStream, (short)1);
-                WriteValue(fileVarsStream, AddStrGetIndex(combinedStrEntries, "templateName", false));
-                WriteValue(fileVarsStream, AddStrGetIndex(combinedStrEntries, file.TemplateRoot.FileName));
+                WriteValue(fileVarsStream, AddStrGetIndex("templateName", false));
+                WriteValue(fileVarsStream, AddStrGetIndex(file.TemplateRoot.FileName));
 
                 // filter entries, eqnVariables are internal and includes should be resolved by now
                 var entries = file.Entries
@@ -60,129 +64,81 @@ namespace TQArchive_Wrapper
                 foreach (var entry in entries)
                 {
                     // name of the variable as int index in string table
-                    var stringID = AddStrGetIndex(combinedStrEntries, entry.Name, false);
+                    var stringID = AddStrGetIndex(entry.Name, false);
 
-                    bool isArray = entry.Template.Class == TQDB_Parser.VariableClass.array;
                     string[] arraySplit = new string[] { entry.Value };
+                    bool isArray = entry.Template.Class == TQDB_Parser.VariableClass.array;
                     if (isArray)
                         arraySplit = entry.Value.Split(';');
                     short numElements = (short)arraySplit.Length;
 
                     short typeID = -1;
-                    var error = false;
-                    // write type as int16
+                    var values = new object[numElements];
+                    bool error = false;
+                    // type as int16
                     switch (entry.Template.Type)
                     {
                         case TQDB_Parser.VariableType.@int:
+                            if (!TryGetIntValues(arraySplit, out values))
+                                error = true;
                             typeID = 0;
                             break;
                         case TQDB_Parser.VariableType.real:
                             typeID = 1;
+                            if (!TryGetFloatValues(arraySplit, out values))
+                                error = true;
                             break;
                         case TQDB_Parser.VariableType.file:
+                            typeID = 2;
+                            for (var i = 0; i < numElements; i++)
+                            {
+                                var element = arraySplit[i];
+                                values[i] = AddStrGetIndex(element);
+                            }
+                            break;
                         case TQDB_Parser.VariableType.@string:
                         case TQDB_Parser.VariableType.equation:
                             typeID = 2;
+                            for (var i = 0; i < numElements; i++)
+                            {
+                                var element = arraySplit[i];
+                                values[i] = AddStrGetIndex(element, false);
+                            }
                             break;
                         case TQDB_Parser.VariableType.@bool:
                             typeID = 3;
+                            if (!TryGetIntValues(arraySplit, out values))
+                                error = true;
                             break;
                     }
-
-                    var values = new object[numElements];
-                    // write the value(s) as a byte array
-                    for (var i = 0; i < numElements; i++)
-                    {
-                        var element = arraySplit[i];
-
-                        switch (entry.Template.Type)
-                        {
-                            case TQDB_Parser.VariableType.@int:
-                            case TQDB_Parser.VariableType.@bool:
-                                {
-                                    if (TQNumberString.TryParseTQString(element, out int iVal))
-                                        values[i] = iVal;
-                                    else
-                                    {
-                                        logger?.LogError("{value} is not a valid int", element);
-                                        error = true;
-                                    }
-                                    break;
-                                }
-                            case TQDB_Parser.VariableType.real:
-                                {
-                                    if (TQNumberString.TryParseTQString(element, out float fVal))
-                                        values[i] = fVal;
-                                    else
-                                    {
-                                        logger?.LogError("{value} is not a valid float", element);
-                                        error = true;
-                                    }
-                                    break;
-                                }
-                            case TQDB_Parser.VariableType.file:
-                                {
-                                    values[i] = AddStrGetIndex(combinedStrEntries, element);
-                                    break;
-                                }
-                            case TQDB_Parser.VariableType.@string:
-                            case TQDB_Parser.VariableType.equation:
-                                {
-                                    values[i] = AddStrGetIndex(combinedStrEntries, element, false);
-                                    break;
-                                }
-                        }
-                    }
-                    // could consider skipping single entries in an array
                     if (error)
-                        continue;
-
-                    // write type id as int16
-                    WriteValue(fileVarsStream, typeID);
-                    // write number of values as int16
-                    WriteValue(fileVarsStream, numElements);
-                    // write the id of the name as int32
-                    WriteValue(fileVarsStream, stringID);
-
-                    // write the values continuously
-                    foreach (var value in values)
                     {
-                        WriteValue(fileVarsStream, value);
+                        combinedStrings.Remove(entry.Name);
+                        continue;
                     }
+
+                    WriteVariable(fileVarsStream, stringID, typeID, values);
                 }
                 // compress the values using ZLib
-                var myBinaryValuesStream = new MemoryStream();
-                using var binaryValuesWriter = new ZLibStream(myBinaryValuesStream, CompressionLevel.SmallestSize, true);
-                WriteMemoryStream(fileVarsStream, binaryValuesWriter);
-                binaryValuesWriter.Dispose();
+                var myBinaryValuesStream = CompressValues(fileVarsStream);
 
                 // dbr file info
-                var currDBRLength = (int)myBinaryValuesStream.Length;
-                var currDBRClass = file["Class"].Value;
-                // timestap for comparison
-                var time = File.GetLastWriteTimeUtc(file.FilePath).ToFileTimeUtc();
+                DBRFileInfo fileInfo = CreateFileInfo(file, fileNameID, (int)myBinaryValuesStream.Length);
 
-                var fileInfo = new DBRFileInfo
-                {
-                    Class = currDBRClass,
-                    NameID = currDBRNameID,
-                    CompressedLength = currDBRLength,
-                    TimeStamp = time,
-                };
-
-                binaryEntries.TryAdd(fileInfo, myBinaryValuesStream);
+                binaryEntries.Add((fileInfo, myBinaryValuesStream));
 
                 FileDone?.Invoke(file.FilePath);
-            });
+            }
+            //);
             using var binaryValuesStream = new MemoryStream();
             using var combinedDBREntries = new MemoryStream();
-            foreach (var binaryEntry in binaryEntries)
+            foreach ((var info, var stream) in binaryEntries)
             {
-                var entry = binaryEntry.Key;
+                var entry = info;
                 entry.Offset = (int)binaryValuesStream.Position;
                 entry.WriteTo(combinedDBREntries);
 
-                var dbrEntry = binaryEntry.Value;
+                var dbrEntry = stream;
                 WriteMemoryStream(dbrEntry, binaryValuesStream);
                 dbrEntry.Dispose();
             }
@@ -198,9 +154,10 @@ namespace TQArchive_Wrapper
 
             // string table header
             int strtableStart = dbtableStart + dbbyteSize;
-            int strbyteSize = combinedStrEntries.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4); // (4 bytes) int32 for length of string
+            // (4 bytes) int32 for length of string
+            int strbyteSize = combinedStrings.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4);
 
-            int strnumEntries = combinedStrEntries.Count;
+            int strnumEntries = combinedStrings.Count;
             strbyteSize += BitConverter.GetBytes(strnumEntries).Length; // add length of numentries
 
             var arzHeader = new ArzHeader
@@ -224,7 +181,7 @@ namespace TQArchive_Wrapper
                 // database record file infos
                 WriteMemoryStream(combinedDBREntries, stream);
                 // strings uncompressed
-                WriteStringTable(combinedStrEntries.Keys, strnumEntries, stream);
+                WriteStringTable(combinedStrings.OrderBy(x => x.Value).Select(x => x.Key), strnumEntries, stream);
             }
             catch (IOException e)
             {
@@ -232,19 +189,98 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private readonly object stringDictionaryLock = new();
+        private DBRFileInfo CreateFileInfo(DBRFile file, int nameID, int length)
+        {
+            // dbr file info
+            var currDBRNameID = nameID;
+            var filePath = file.FilePath;
+            // timestap for comparison
+            var time = File.GetLastWriteTimeUtc(filePath).ToFileTimeUtc();
 
-        private int AddStrGetIndex(IDictionary<string, int> strings, string str, bool ignoreCase = true)
+            var fileInfo = new DBRFileInfo
+            {
+                Class = file["Class"].Value,
+                NameID = currDBRNameID,
+                CompressedLength = length,
+                TimeStamp = time,
+            };
+            return fileInfo;
+        }
+
+        private static MemoryStream CompressValues(MemoryStream fileVarsStream)
+        {
+            var myBinaryValuesStream = new MemoryStream();
+
+            // compress the values using ZLib
+            using var binaryValuesWriter = new ZLibStream(myBinaryValuesStream, CompressionLevel.SmallestSize, true);
+            WriteMemoryStream(fileVarsStream, binaryValuesWriter);
+
+            return myBinaryValuesStream;
+        }
+
+        private bool TryGetFloatValues(string[] elements, out object[]? values)
+        {
+            values = new object[elements.Length];
+            for (int i = 0; i < elements.Length; i++)
+            {
+                var element = elements[i];
+                if (!TQNumberString.TryParseTQString(element, out float fVal))
+                {
+                    logger?.LogError("{value} is not a valid float", element);
+                    values = null;
+                    return false;
+                }
+                values[i] = fVal;
+            }
+
+            return true;
+        }
+
+        private bool TryGetIntValues(string[] elements, out object[]? values)
+        {
+            values = new object[elements.Length];
+            for (int i = 0; i < elements.Length; i++)
+            {
+                var element = elements[i];
+                if (!TQNumberString.TryParseTQString(element, out int iVal))
+                {
+                    logger?.LogError("{value} is not a valid float", element);
+                    values = null;
+                    return false;
+                }
+                values[i] = iVal;
+            }
+
+            return true;
+        }
+
+        private static void WriteVariable(MemoryStream stream, int stringID, short typeID, object[] values)
+        {
+            // write type id as int16
+            WriteValue(stream, typeID);
+            // write number of values as int16
+            WriteValue(stream, values.Length);
+            // write the id of the name as int32
+            WriteValue(stream, stringID);
+
+            // write the values continuously
+            foreach (var value in values)
+            {
+                WriteValue(stream, value);
+            }
+        }
+
+        private int AddStrGetIndex(string str, bool ignoreCase = true)
         {
             // ignoreCase can save a bit of size, ArtManager is really inconsistent
             if (ignoreCase)
                 str = str.ToLowerInvariant();
             lock (stringDictionaryLock)
             {
-                if (!strings.TryGetValue(str, out int idx))
+                if (!combinedStrings.TryGetValue(str, out int idx))
                 {
-                    idx = strings.Count;
-                    strings.Add(str, idx);
+                    idx = combinedStrings.Count;
+                    combinedStrings.Add(str, idx);
                 }
                 return idx;
             }
