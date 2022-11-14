@@ -34,20 +34,25 @@ namespace TQArchive_Wrapper
         {
             //var strEntries = new List<string>();
             combinedStrings.Clear();
-            var binaryEntries = new ConcurrentBag<(DBRFileInfo, MemoryStream)>();
+            var binaryEntries = new List<(DBRFileInfo, MemoryStream)>();
 
             foreach (var file in files)
             //Parallel.ForEach(files, file =>
             {
                 using var fileVarsStream = new MemoryStream();
 
-                var fileNameID = AddStrGetIndex(file.FilePath[file.FilePath.IndexOf("records")..]);
 
                 // write templateName as variable, it's excluded in DBRFile entries
                 WriteValue(fileVarsStream, (short)2);
                 WriteValue(fileVarsStream, (short)1);
-                WriteValue(fileVarsStream, AddStrGetIndex("templateName", false));
-                WriteValue(fileVarsStream, AddStrGetIndex(file.TemplateRoot.FileName));
+
+                int fileNameID;
+                lock (stringDictionaryLock)
+                {
+                    fileNameID = AddStrGetIndex(file.FilePath[file.FilePath.IndexOf("records")..]);
+                    WriteValue(fileVarsStream, AddStrGetIndex("templateName", false));
+                    WriteValue(fileVarsStream, AddStrGetIndex(file.TemplateRoot.FileName));
+                }
 
                 // filter entries, eqnVariables are internal and includes should be resolved by now
                 var entries = file.Entries
@@ -64,7 +69,7 @@ namespace TQArchive_Wrapper
                 foreach (var entry in entries)
                 {
                     // name of the variable as int index in string table
-                    var stringID = AddStrGetIndex(entry.Name, false);
+                    var stringID = AddStrGetIndexLocked(entry.Name, false);
 
                     string[] arraySplit = new string[] { entry.Value };
                     bool isArray = entry.Template.Class == TQDB_Parser.VariableClass.array;
@@ -73,7 +78,7 @@ namespace TQArchive_Wrapper
                     short numElements = (short)arraySplit.Length;
 
                     short typeID = -1;
-                    var values = new object[numElements];
+                    object? values = null;
                     bool error = false;
                     // type as int16
                     switch (entry.Template.Type)
@@ -90,20 +95,12 @@ namespace TQArchive_Wrapper
                             break;
                         case TQDB_Parser.VariableType.file:
                             typeID = 2;
-                            for (var i = 0; i < numElements; i++)
-                            {
-                                var element = arraySplit[i];
-                                values[i] = AddStrGetIndex(element);
-                            }
+                            values = AddStrsGetIndicesAsync(arraySplit, true);
                             break;
                         case TQDB_Parser.VariableType.@string:
                         case TQDB_Parser.VariableType.equation:
                             typeID = 2;
-                            for (var i = 0; i < numElements; i++)
-                            {
-                                var element = arraySplit[i];
-                                values[i] = AddStrGetIndex(element, false);
-                            }
+                            values = AddStrsGetIndicesAsync(arraySplit, false);
                             break;
                         case TQDB_Parser.VariableType.@bool:
                             typeID = 3;
@@ -111,7 +108,7 @@ namespace TQArchive_Wrapper
                                 error = true;
                             break;
                     }
-                    if (error)
+                    if (error || values is null)
                     {
                         combinedStrings.Remove(entry.Name);
                         continue;
@@ -189,7 +186,7 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private DBRFileInfo CreateFileInfo(DBRFile file, int nameID, int length)
+        private static DBRFileInfo CreateFileInfo(DBRFile file, int nameID, int length)
         {
             // dbr file info
             var currDBRNameID = nameID;
@@ -218,7 +215,7 @@ namespace TQArchive_Wrapper
             return myBinaryValuesStream;
         }
 
-        private bool TryGetFloatValues(string[] elements, out object[]? values)
+        private bool TryGetFloatValues(string[] elements, out object? values)
         {
             values = new object[elements.Length];
             for (int i = 0; i < elements.Length; i++)
@@ -230,13 +227,13 @@ namespace TQArchive_Wrapper
                     values = null;
                     return false;
                 }
-                values[i] = fVal;
+                ((object[])values)[i] = fVal;
             }
 
             return true;
         }
 
-        private bool TryGetIntValues(string[] elements, out object[]? values)
+        private bool TryGetIntValues(string[] elements, out object? values)
         {
             values = new object[elements.Length];
             for (int i = 0; i < elements.Length; i++)
@@ -248,21 +245,43 @@ namespace TQArchive_Wrapper
                     values = null;
                     return false;
                 }
-                values[i] = iVal;
+                ((object[])values)[i] = iVal;
             }
 
             return true;
         }
 
-        private static void WriteVariable(MemoryStream stream, int stringID, short typeID, object[] values)
+        private static void WriteVariableHeader(MemoryStream stream, int stringID, short typeID, short numElements)
         {
             // write type id as int16
             WriteValue(stream, typeID);
             // write number of values as int16
-            WriteValue(stream, values.Length);
+            WriteValue(stream, numElements);
             // write the id of the name as int32
             WriteValue(stream, stringID);
+        }
 
+        private static void WriteVariable(MemoryStream stream, int stringID, short typeID, object oValues)
+        {
+            object[] valuesArr;
+            if (oValues is object[] passedArr)
+            {
+                valuesArr = passedArr;
+            }
+            else if (oValues is Task<object[]> valuesTask)
+            {
+                valuesTask.Wait();
+                valuesArr = valuesTask.Result;
+            }
+            else
+                throw new NotImplementedException();
+
+            WriteVariableHeader(stream, stringID, typeID, (short)valuesArr.Length);
+            WriteVariableValues(stream, valuesArr);
+        }
+
+        private static void WriteVariableValues(MemoryStream stream, object[] values)
+        {
             // write the values continuously
             foreach (var value in values)
             {
@@ -270,19 +289,46 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private int AddStrGetIndex(string str, bool ignoreCase = true)
+        private Task<object[]> AddStrsGetIndicesAsync(string[] strs, bool ignoreCase)
+        {
+            var ret = new Task<object[]>(() => AddStrsGetIndices(strs, ignoreCase));
+            ret.Start();
+            return ret;
+        }
+
+        private object[] AddStrsGetIndices(string[] strs, bool ignoreCase)
         {
             // ignoreCase can save a bit of size, ArtManager is really inconsistent
             if (ignoreCase)
-                str = str.ToLowerInvariant();
+                strs = strs.Select(x => x.ToLowerInvariant()).ToArray();
+
+            var ret = new object[strs.Length];
             lock (stringDictionaryLock)
             {
-                if (!combinedStrings.TryGetValue(str, out int idx))
-                {
-                    idx = combinedStrings.Count;
-                    combinedStrings.Add(str, idx);
-                }
-                return idx;
+                for (int i = 0; i < strs.Length; i++)
+                    ret[i] = AddStrGetIndex(strs[i], ignoreCase);
+            }
+            return ret;
+        }
+
+        private int AddStrGetIndex(string str, bool ignoreCase = true)
+        {
+            if (ignoreCase)
+                str = str.ToLowerInvariant();
+
+            if (!combinedStrings.TryGetValue(str, out int idx))
+            {
+                idx = combinedStrings.Count;
+                combinedStrings.Add(str, idx);
+            }
+            return idx;
+        }
+
+        private int AddStrGetIndexLocked(string str, bool ignoreCase = true)
+        {
+            lock (stringDictionaryLock)
+            {
+                return AddStrGetIndex(str, ignoreCase);
             }
         }
 
