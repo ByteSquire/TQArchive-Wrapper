@@ -14,70 +14,88 @@ namespace TQArchive_Wrapper
     public class ArzWriter
     {
         private readonly string filePath;
+        private readonly string databasePath;
         private readonly ILogger? logger;
 
-        private readonly object stringDictionaryLock = new();
-        private readonly IDictionary<string, int> combinedStrings;
+        //private readonly object stringDictionaryLock = new();
+        //private readonly IDictionary<string, int> combinedStrings;
 
-        public ArzWriter(string filePath, ILogger? logger = null)
+        public ArzWriter(string filePath, string databasePath, ILogger? logger = null)
         {
             this.filePath = Path.GetFullPath(filePath);
+            this.databasePath = databasePath;
             this.logger = logger;
-            combinedStrings = new Dictionary<string, int>();
+            //combinedStrings = new Dictionary<string, int>();
             if (!File.Exists(filePath))
                 File.Create(filePath).Dispose();
         }
 
-        public event Action<string>? FileDone;
-
         public void Write(IEnumerable<DBRFile> files, bool useParallel = false)
         {
             //var strEntries = new List<string>();
-            combinedStrings.Clear();
+            //combinedStrings.Clear();
             IEnumerable<(DBRFileInfo, MemoryStream)> binaryEntries;
+            var strings = new Dictionary<string, int>();
 
             if (useParallel)
             {
                 var parallelBinaryEntries = new ConcurrentBag<(DBRFileInfo, MemoryStream)>();
                 binaryEntries = parallelBinaryEntries;
-                Parallel.ForEach(files, file => WriteFile(file, parallelBinaryEntries.Add));
+                Parallel.ForEach(files, file => parallelBinaryEntries.Add(WriteFileToStreamCreateInfo(file, strings)));
             }
             else
             {
                 var linearBinaryEntries = new List<(DBRFileInfo, MemoryStream)>();
                 binaryEntries = linearBinaryEntries;
                 foreach (var file in files)
-                    WriteFile(file, linearBinaryEntries.Add);
+                    linearBinaryEntries.Add(WriteFileToStreamCreateInfo(file, strings));
             }
 
-            using var binaryValuesStream = new MemoryStream();
-            using var combinedDBREntries = new MemoryStream();
-            foreach ((var info, var stream) in binaryEntries)
-            {
-                var entry = info;
-                entry.Offset = (int)binaryValuesStream.Position;
-                entry.WriteTo(combinedDBREntries);
+            (var binaryValuesStream, var combinedDBREntries) = CreateArchiveStreams(binaryEntries);
 
-                var dbrEntry = stream;
+            WriteArchive(files.Count(), strings.OrderBy(x => x.Value).Select(x => x.Key), binaryValuesStream, combinedDBREntries);
+        }
+
+        public void Write(IEnumerable<(DBRFileInfo, MemoryStream)> files, IDictionary<string, int> strings)
+        {
+            (var binaryValuesStream, var combinedDBREntries) = CreateArchiveStreams(files);
+
+            WriteArchive(files.Count(), strings.OrderBy(x => x.Value).Select(x => x.Key), binaryValuesStream, combinedDBREntries);
+        }
+
+        private static (MemoryStream, MemoryStream) CreateArchiveStreams(IEnumerable<(DBRFileInfo Info, MemoryStream Stream)> binaryEntries)
+        {
+            var binaryValuesStream = new MemoryStream();
+            var combinedDBREntries = new MemoryStream();
+            foreach (var entry in binaryEntries)
+            {
+                var info = entry.Info;
+                info.Offset = (int)binaryValuesStream.Position;
+                info.WriteTo(combinedDBREntries);
+
+                var dbrEntry = entry.Stream;
                 WriteMemoryStream(dbrEntry, binaryValuesStream);
                 dbrEntry.Dispose();
             }
+            return (binaryValuesStream, combinedDBREntries);
+        }
 
+        private void WriteArchive(int numFiles, IEnumerable<string> strings, MemoryStream binaryValuesStream, MemoryStream combinedDBREntries)
+        {
             // database entries table header
             int dbtableStart = (int)binaryValuesStream.Length;
             dbtableStart += ArzHeader.DBTableBaseOffset; // add 24 bytes for header
 
-            combinedDBREntries.Flush();
             // database record files header
             int dbbyteSize = (int)combinedDBREntries.Length;
-            int dbnumEntries = files.Count();
+            int dbnumEntries = numFiles;
 
             // string table header
             int strtableStart = dbtableStart + dbbyteSize;
             // (4 bytes) int32 for length of string
-            int strbyteSize = combinedStrings.Sum(x => Constants.Encoding1252.GetBytes(x.Key).Length + 4);
+            int strbyteSize = strings.Sum(x => Constants.Encoding1252.GetBytes(x).Length + 4);
 
-            int strnumEntries = combinedStrings.Count;
+            int strnumEntries = strings.Count();
             strbyteSize += BitConverter.GetBytes(strnumEntries).Length; // add length of numentries
 
             var arzHeader = new ArzHeader
@@ -101,15 +119,52 @@ namespace TQArchive_Wrapper
                 // database record file infos
                 WriteMemoryStream(combinedDBREntries, stream);
                 // strings uncompressed
-                WriteStringTable(combinedStrings.OrderBy(x => x.Value).Select(x => x.Key), strnumEntries, stream);
+                WriteStringTable(strings, strnumEntries, stream);
             }
             catch (IOException e)
             {
                 logger?.LogError(e, "Error writing to arz archive {archive}", filePath);
             }
+            binaryValuesStream.Dispose();
+            combinedDBREntries.Dispose();
         }
 
-        private void WriteFile(DBRFile file, Action<(DBRFileInfo, MemoryStream)> addToList)
+        //public void AddFile(DBRFile file, IEnumerable<(DBRFileInfo info, MemoryStream stream)> existing, IList<string> existingStrings)
+        //{
+        //    var existingList = existing.ToList();
+        //    var matchingIndex = existingList.FindIndex(x => existingStrings[x.info.NameID] == file.FilePath);
+
+        //    if (matchingIndex > -1)
+        //    {
+        //        var ourTime = File.GetLastWriteTimeUtc(file.FilePath).ToFileTimeUtc();
+        //        var theirTime = existingList[matchingIndex].info.TimeStamp;
+        //        if (theirTime >= ourTime)
+        //            return;
+        //        (DBRFileInfo, MemoryStream) entry = CreateNewEntry(file, existingStrings);
+        //        existingList[matchingIndex] = entry;
+        //    }
+        //    else
+        //    {
+        //        (DBRFileInfo, MemoryStream) entry = CreateNewEntry(file, existingStrings);
+        //        existingList.Add(entry);
+        //    }
+
+        //    (var dataStream, var dbrInfoStream) = CreateArchiveStreams(existingList);
+
+        //    WriteArchive(existingList.Count, dataStream, dbrInfoStream);
+
+
+        //    (DBRFileInfo, MemoryStream) CreateNewEntry(DBRFile file, IList<string> existingStrings)
+        //    {
+        //        combinedStrings.Clear();
+        //        foreach (var existingStr in existingStrings)
+        //            combinedStrings.Add(existingStr, combinedStrings.Count);
+        //        var entry = WriteFileToStreamCreateInfo(file);
+        //        return entry;
+        //    }
+        //}
+
+        public (DBRFileInfo, MemoryStream) WriteFileToStreamCreateInfo(DBRFile file, IDictionary<string, int> strings)
         {
             using var fileVarsStream = new MemoryStream();
 
@@ -118,12 +173,12 @@ namespace TQArchive_Wrapper
             WriteValue(fileVarsStream, (short)1);
 
             int fileNameID;
-            lock (stringDictionaryLock)
-            {
-                fileNameID = AddStrGetIndex(file.FilePath[file.FilePath.IndexOf("records")..]);
-                WriteValue(fileVarsStream, AddStrGetIndex("templateName", false));
-                WriteValue(fileVarsStream, AddStrGetIndex(file.TemplateRoot.FileName));
-            }
+            //lock (stringDictionaryLock)
+            //{
+            fileNameID = AddStrGetIndex(strings, Path.GetRelativePath(databasePath, file.FilePath));
+            WriteValue(fileVarsStream, AddStrGetIndex(strings, "templateName", false));
+            WriteValue(fileVarsStream, AddStrGetIndex(strings, file.TemplateRoot.FileName));
+            //}
 
             // filter entries, eqnVariables are internal and includes should be resolved by now
             var entries = file.Entries
@@ -140,7 +195,7 @@ namespace TQArchive_Wrapper
             foreach (var entry in entries)
             {
                 // name of the variable as int index in string table
-                var stringID = AddStrGetIndexLocked(entry.Name, false);
+                var stringID = AddStrGetIndexLocked(strings, entry.Name, false);
 
                 string[] arraySplit = new string[] { entry.Value };
                 bool isArray = entry.Template.Class == TQDB_Parser.VariableClass.array;
@@ -166,12 +221,12 @@ namespace TQArchive_Wrapper
                         break;
                     case TQDB_Parser.VariableType.file:
                         typeID = 2;
-                        values = AddStrsGetIndicesAsync(arraySplit, true);
+                        values = AddStrsGetIndicesAsync(strings, arraySplit, true);
                         break;
                     case TQDB_Parser.VariableType.@string:
                     case TQDB_Parser.VariableType.equation:
                         typeID = 2;
-                        values = AddStrsGetIndicesAsync(arraySplit, false);
+                        values = AddStrsGetIndicesAsync(strings, arraySplit, false);
                         break;
                     case TQDB_Parser.VariableType.@bool:
                         typeID = 3;
@@ -193,9 +248,7 @@ namespace TQArchive_Wrapper
             // dbr file info
             DBRFileInfo fileInfo = CreateFileInfo(file, fileNameID, (int)myBinaryValuesStream.Length);
 
-            addToList.Invoke((fileInfo, myBinaryValuesStream));
-
-            FileDone?.Invoke(file.FilePath);
+            return (fileInfo, myBinaryValuesStream);
         }
 
         private static DBRFileInfo CreateFileInfo(DBRFile file, int nameID, int length)
@@ -229,7 +282,7 @@ namespace TQArchive_Wrapper
 
         private bool TryGetFloatValues(string[] elements, out object? values)
         {
-            values = new object[elements.Length];
+            var iValues = new object[elements.Length];
             for (int i = 0; i < elements.Length; i++)
             {
                 var element = elements[i];
@@ -239,15 +292,16 @@ namespace TQArchive_Wrapper
                     values = null;
                     return false;
                 }
-                ((object[])values)[i] = fVal;
+                iValues[i] = fVal;
             }
 
+            values = iValues;
             return true;
         }
 
         private bool TryGetIntValues(string[] elements, out object? values)
         {
-            values = new object[elements.Length];
+            var fValues = new object[elements.Length];
             for (int i = 0; i < elements.Length; i++)
             {
                 var element = elements[i];
@@ -257,9 +311,10 @@ namespace TQArchive_Wrapper
                     values = null;
                     return false;
                 }
-                ((object[])values)[i] = iVal;
+                fValues[i] = iVal;
             }
 
+            values = fValues;
             return true;
         }
 
@@ -301,47 +356,47 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private Task<object[]> AddStrsGetIndicesAsync(string[] strs, bool ignoreCase)
+        private Task<object[]> AddStrsGetIndicesAsync(IDictionary<string, int> mappedStrings, string[] strs, bool ignoreCase)
         {
-            var ret = new Task<object[]>(() => AddStrsGetIndices(strs, ignoreCase));
+            var ret = new Task<object[]>(() => AddStrsGetIndices(mappedStrings, strs, ignoreCase));
             ret.Start();
             return ret;
         }
 
-        private object[] AddStrsGetIndices(string[] strs, bool ignoreCase)
+        private object[] AddStrsGetIndices(IDictionary<string, int> mappedStrings, string[] strs, bool ignoreCase)
         {
             // ignoreCase can save a bit of size, ArtManager is really inconsistent
             if (ignoreCase)
                 strs = strs.Select(x => x.ToLowerInvariant()).ToArray();
 
             var ret = new object[strs.Length];
-            lock (stringDictionaryLock)
-            {
-                for (int i = 0; i < strs.Length; i++)
-                    ret[i] = AddStrGetIndex(strs[i], false);
-            }
+            //lock (stringDictionaryLock)
+            //{
+            for (int i = 0; i < strs.Length; i++)
+                ret[i] = AddStrGetIndex(mappedStrings, strs[i], false);
+            //}
             return ret;
         }
 
-        private int AddStrGetIndex(string str, bool ignoreCase = true)
+        private int AddStrGetIndex(IDictionary<string, int> mappedStrings, string str, bool ignoreCase = true)
         {
             if (ignoreCase)
                 str = str.ToLowerInvariant();
 
-            if (!combinedStrings.TryGetValue(str, out int idx))
+            if (!mappedStrings.TryGetValue(str, out int idx))
             {
-                idx = combinedStrings.Count;
-                combinedStrings.Add(str, idx);
+                idx = mappedStrings.Count;
+                mappedStrings.Add(str, idx);
             }
             return idx;
         }
 
-        private int AddStrGetIndexLocked(string str, bool ignoreCase = true)
+        private int AddStrGetIndexLocked(IDictionary<string, int> mappedStrings, string str, bool ignoreCase = true)
         {
-            lock (stringDictionaryLock)
-            {
-                return AddStrGetIndex(str, ignoreCase);
-            }
+            //lock (stringDictionaryLock)
+            //{
+            return AddStrGetIndex(mappedStrings, str, ignoreCase);
+            //}
         }
 
         private static void WriteValue<T>(Stream writer, T value)

@@ -65,6 +65,16 @@ namespace TQArchive_Wrapper
             }
         }
 
+        public ArzHeader GetHeader()
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
+            if (!headerInitialised)
+                ReadHeader(reader);
+
+            return header;
+        }
+
         public IEnumerable<string> GetStringList()
         {
             if (stringList.Count > 0)
@@ -260,6 +270,43 @@ namespace TQArchive_Wrapper
             return ReadDBRFile(stream, info);
         }
 
+        public MemoryStream GetCompressedFileStream(DBRFileInfo info)
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+            return ExtractCompressedFile(stream, info);
+        }
+
+        public IEnumerable<MemoryStream> GetCompressedFileStreams()
+        {
+            return GetCompressedFileStreams(GetDBRFileInfos());
+        }
+
+        public IEnumerable<MemoryStream> GetCompressedFileStreams(IEnumerable<DBRFileInfo> infos)
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+            foreach (var info in infos)
+            {
+                yield return ExtractCompressedFile(stream, info);
+            }
+        }
+
+        public MemoryStream GetDecompressedFileStream(DBRFileInfo info)
+        {
+            return CreateDecompressedStream(GetCompressedFileStream(info));
+        }
+
+        public IEnumerable<MemoryStream> GetDecompressedFileStreams()
+        {
+            return GetDecompressedFileStreams(GetDBRFileInfos());
+        }
+
+        public IEnumerable<MemoryStream> GetDecompressedFileStreams(IEnumerable<DBRFileInfo> infos)
+        {
+            return GetCompressedFileStreams(infos).Select(x => CreateDecompressedStream(x));
+        }
+
         private RawDBRFile ReadDBRFile(Stream stream, DBRFileInfo info)
         {
             var fileName = GetString(info.NameID);
@@ -276,7 +323,7 @@ namespace TQArchive_Wrapper
 
             try
             {
-                using MemoryStream inflatedStream = ExtractCompressedFile(stream, fileOffset, info.CompressedLength);
+                using MemoryStream inflatedStream = ExtractCompressedFile(stream, info);
 
                 using MemoryStream deflatedStream = CreateDecompressedStream(inflatedStream);
 
@@ -297,7 +344,20 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private Dictionary<string, string> ReadRawEntries(MemoryStream deflatedStream)
+        public RawDBRFile ReadDBRFile(Stream decompressedStream, string fileName)
+        {
+            var rawEntries = ReadRawEntries(decompressedStream);
+            if (!rawEntries.TryGetValue(TQDB_Parser.Constants.TemplateKey, out var templateName))
+            {
+                var exc = new Exception("Missing templateName");
+                throw exc;
+            }
+            rawEntries.Remove(TQDB_Parser.Constants.TemplateKey);
+
+            return new RawDBRFile { FileName = fileName, TemplateName = templateName, RawEntries = rawEntries };
+        }
+
+        private Dictionary<string, string> ReadRawEntries(Stream deflatedStream)
         {
             // Create reader for decompressed data
             using var reader = new BinaryReader(deflatedStream);
@@ -414,8 +474,11 @@ namespace TQArchive_Wrapper
             return deflatedStream;
         }
 
-        private MemoryStream ExtractCompressedFile(Stream stream, int fileOffset, long compressedLength)
+        private MemoryStream ExtractCompressedFile(Stream stream, DBRFileInfo info)
         {
+            var fileOffset = info.Offset + ArzHeader.DBTableBaseOffset;
+            var compressedLength = info.CompressedLength;
+
             // Copy compressed file to buffer used in MemoryStream
             stream.Seek(fileOffset, SeekOrigin.Begin);
             var buffer = new byte[compressedLength];
