@@ -29,12 +29,12 @@ namespace TQArchive_Wrapper
                 logger?.LogError(exc, "File {file}", filePath);
                 throw exc;
             }
-            if (new FileInfo(filePath).Length == 0)
-            {
-                var exc = new ArgumentException("Trying to read an empty file", nameof(filePath));
-                logger?.LogError(exc, "File {file}", filePath);
-                throw exc;
-            }
+            //if (new FileInfo(filePath).Length == 0)
+            //{
+            //    var exc = new ArgumentException("Trying to read an empty file", nameof(filePath));
+            //    logger?.LogError(exc, "File {file}", filePath);
+            //    throw exc;
+            //}
             this.logger = logger;
 
             stringList = new();
@@ -327,15 +327,7 @@ namespace TQArchive_Wrapper
 
                 using MemoryStream deflatedStream = CreateDecompressedStream(inflatedStream);
 
-                var rawEntries = ReadRawEntries(deflatedStream);
-                if (!rawEntries.TryGetValue(TQDB_Parser.Constants.TemplateKey, out var templateName))
-                {
-                    var exc = new Exception("Missing templateName");
-                    throw exc;
-                }
-                rawEntries.Remove(TQDB_Parser.Constants.TemplateKey);
-
-                return new RawDBRFile { FileName = fileName, TemplateName = templateName, RawEntries = rawEntries };
+                return ReadDBRFile(deflatedStream, fileName);
             }
             catch (Exception e)
             {
@@ -350,6 +342,7 @@ namespace TQArchive_Wrapper
             if (!rawEntries.TryGetValue(TQDB_Parser.Constants.TemplateKey, out var templateName))
             {
                 var exc = new Exception("Missing templateName");
+                logger?.LogError(exc, "File {file}", fileName);
                 throw exc;
             }
             rawEntries.Remove(TQDB_Parser.Constants.TemplateKey);
