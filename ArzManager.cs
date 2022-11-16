@@ -31,6 +31,8 @@ namespace TQArchive_Wrapper
         private readonly Dictionary<string, RawDBRFile> mappedFiles;
         private readonly Dictionary<string, int> mappedStrings;
 
+        public event Action? FileDone;
+
         public ArzManager(string filePath, string baseDir, ILogger? logger = null)
         {
             this.filePath = Path.GetFullPath(filePath);
@@ -102,6 +104,7 @@ namespace TQArchive_Wrapper
                 if (existingInfo.TimeStamp >= File.GetLastWriteTimeUtc(filePath).ToFileTimeUtc())
                 {
                     //logger?.LogWarning("File {path} has been skipped (Newer in archive)");
+                    FileDone?.Invoke();
                     return;
                 }
 
@@ -122,6 +125,7 @@ namespace TQArchive_Wrapper
             mappedFiles[relPath] = reader.ReadDBRFile(decompressedDataStream, relPath);
 
             logger?.LogInformation("File {path} has been {msg}", filePath, message);
+            FileDone?.Invoke();
             needsWriting = true;
             return;
         }
