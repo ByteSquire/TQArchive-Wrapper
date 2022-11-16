@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection.PortableExecutable;
 using System.Text;
@@ -13,6 +14,7 @@ namespace TQArchive_Wrapper
     public class ArzManager
     {
         private readonly ArzWriter writer;
+        private readonly ArzReader reader;
         private readonly string filePath;
 
         private readonly string baseDir;
@@ -47,15 +49,13 @@ namespace TQArchive_Wrapper
             mappedFiles = new();
             mappedStrings = new();
 
-            if (!File.Exists(filePath))
-                File.Create(filePath).Dispose();
-            else if (new FileInfo(filePath).Length > 0)
+            reader = new ArzReader(filePath, logger);
+            if (new FileInfo(filePath).Length > 0)
                 ReadArchive();
         }
 
         private void ReadArchive()
         {
-            var reader = new ArzReader(filePath, logger);
             foreach (var str in reader.GetStringList())
             {
                 mappedStrings.Add(str, stringList.Count);
@@ -108,9 +108,18 @@ namespace TQArchive_Wrapper
                 compressedFiles.Remove(existingInfo);
                 message = "updated";
             }
+            var currStringCount = mappedStrings.Count;
             var (additionalInfo, additionalStream) = writer.WriteFileToStreamCreateInfo(file.Invoke(), mappedStrings);
+            var countDiff = mappedStrings.Count - currStringCount;
+            if (countDiff > 0)
+            {
+                stringList.AddRange(mappedStrings.TakeLast(countDiff).Select(x => x.Key));
+            }
             mappedFileInfos[relPath] = additionalInfo;
             compressedFiles.Add(additionalInfo, additionalStream);
+
+            var decompressedDataStream = reader.GetDecompressedFileStream(additionalInfo);
+            mappedFiles[relPath] = reader.ReadDBRFile(decompressedDataStream, relPath);
 
             logger?.LogInformation("File {path} has been {msg}", filePath, message);
             needsWriting = true;
