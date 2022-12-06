@@ -210,9 +210,9 @@ namespace TQArchive_Wrapper
                 switch (entry.Template.Type)
                 {
                     case TQDB_Parser.VariableType.@int:
+                        typeID = 0;
                         if (!TryGetIntValues(arraySplit, out values))
                             error = true;
-                        typeID = 0;
                         break;
                     case TQDB_Parser.VariableType.real:
                         typeID = 1;
@@ -307,7 +307,7 @@ namespace TQArchive_Wrapper
                 var element = elements[i];
                 if (!TQNumberString.TryParseTQString(element, out int iVal))
                 {
-                    logger?.LogError("{value} is not a valid float", element);
+                    logger?.LogError("{value} is not a valid integer", element);
                     values = null;
                     return false;
                 }
