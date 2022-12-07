@@ -1,5 +1,4 @@
-﻿
-namespace TQArchive_Wrapper
+﻿namespace TQArchive_Wrapper
 {
     public struct ArzHeader
     {
@@ -106,5 +105,10 @@ namespace TQArchive_Wrapper
         public string FileName { get; set; }
         public string TemplateName { get; set; }
         public IReadOnlyDictionary<string, string> RawEntries { get; set; }
+
+        public static RawDBRFile From(TQDB_Parser.DBR.DBRFile dbrFile)
+        {
+            return new RawDBRFile { FileName = dbrFile.FileName, TemplateName = dbrFile.TemplateRoot.FileName, RawEntries = dbrFile.Entries.ToDictionary(x => x.Name, x => x.Value) };
+        }
     }
 }

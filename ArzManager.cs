@@ -112,22 +112,31 @@ namespace TQArchive_Wrapper
                 message = "updated";
             }
             var currStringCount = mappedStrings.Count;
-            var (additionalInfo, additionalStream) = writer.WriteFileToStreamCreateInfo(file.Invoke(), mappedStrings);
-            var countDiff = mappedStrings.Count - currStringCount;
-            if (countDiff > 0)
+            try
             {
-                stringList.AddRange(mappedStrings.TakeLast(countDiff).Select(x => x.Key));
+                var dbrFile = file.Invoke();
+
+                var additionalStream = writer.WriteFileToStream(dbrFile, mappedStrings);
+                var countDiff = mappedStrings.Count - currStringCount;
+                if (countDiff > 0)
+                {
+                    stringList.AddRange(mappedStrings.TakeLast(countDiff).Select(x => x.Key));
+                }
+
+                var (additionalInfo, compressedStream) = writer.CompressAndCreateInfo(additionalStream, mappedStrings, dbrFile);
+                mappedFileInfos[relPath] = additionalInfo;
+                compressedFiles.Add(additionalInfo, compressedStream);
+
+                mappedFiles[relPath] = RawDBRFile.From(dbrFile);
+
+                logger?.LogInformation("File {path} has been {msg}", filePath, message);
+                FileDone?.Invoke();
+                needsWriting = true;
             }
-            mappedFileInfos[relPath] = additionalInfo;
-            compressedFiles.Add(additionalInfo, additionalStream);
-
-            var decompressedDataStream = reader.GetDecompressedFileStream(additionalInfo);
-            mappedFiles[relPath] = reader.ReadDBRFile(decompressedDataStream, relPath);
-
-            logger?.LogInformation("File {path} has been {msg}", filePath, message);
-            FileDone?.Invoke();
-            needsWriting = true;
-            return;
+            catch (Exception e)
+            {
+                logger?.LogError(e, "Failed to get file: {path}", filePath);
+            }
         }
 
         public void SyncFiles(IEnumerable<string> filePaths, DBRParser parser)

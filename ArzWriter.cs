@@ -41,14 +41,14 @@ namespace TQArchive_Wrapper
             {
                 var parallelBinaryEntries = new ConcurrentBag<(DBRFileInfo, MemoryStream)>();
                 binaryEntries = parallelBinaryEntries;
-                Parallel.ForEach(files, file => parallelBinaryEntries.Add(WriteFileToStreamCreateInfo(file, strings)));
+                Parallel.ForEach(files, file => parallelBinaryEntries.Add(CompressAndCreateInfo(WriteFileToStream(file, strings), strings, file)));
             }
             else
             {
                 var linearBinaryEntries = new List<(DBRFileInfo, MemoryStream)>();
                 binaryEntries = linearBinaryEntries;
                 foreach (var file in files)
-                    linearBinaryEntries.Add(WriteFileToStreamCreateInfo(file, strings));
+                    linearBinaryEntries.Add(CompressAndCreateInfo(WriteFileToStream(file, strings), strings, file));
             }
 
             (var binaryValuesStream, var combinedDBREntries) = CreateArchiveStreams(binaryEntries);
@@ -164,9 +164,9 @@ namespace TQArchive_Wrapper
         //    }
         //}
 
-        public (DBRFileInfo, MemoryStream) WriteFileToStreamCreateInfo(DBRFile file, IDictionary<string, int> strings)
+        public MemoryStream WriteFileToStream(DBRFile file, IDictionary<string, int> strings)
         {
-            using var fileVarsStream = new MemoryStream();
+            var fileVarsStream = new MemoryStream();
 
             // write templateName as variable, it's excluded in DBRFile entries
             WriteValue(fileVarsStream, (short)2);
@@ -242,19 +242,25 @@ namespace TQArchive_Wrapper
 
                 WriteVariable(fileVarsStream, stringID, typeID, values);
             }
+
+            return fileVarsStream;
+        }
+
+        public (DBRFileInfo, MemoryStream) CompressAndCreateInfo(MemoryStream stream, IDictionary<string, int> strings, DBRFile file)
+        {
             // compress the values using ZLib
-            var myBinaryValuesStream = CompressValues(fileVarsStream);
+            var myBinaryValuesStream = CompressValues(stream);
 
             // dbr file info
-            DBRFileInfo fileInfo = CreateFileInfo(file, fileNameID, (int)myBinaryValuesStream.Length);
+            DBRFileInfo fileInfo = CreateFileInfo(file, strings, (int)myBinaryValuesStream.Length);
 
             return (fileInfo, myBinaryValuesStream);
         }
 
-        private static DBRFileInfo CreateFileInfo(DBRFile file, int nameID, int length)
+        private DBRFileInfo CreateFileInfo(DBRFile file, IDictionary<string, int> strings, int length)
         {
             // dbr file info
-            var currDBRNameID = nameID;
+            var currDBRNameID = AddStrGetIndex(strings, Path.GetRelativePath(databasePath, file.FilePath));
             var filePath = file.FilePath;
             // timestap for comparison
             var time = File.GetLastWriteTimeUtc(filePath).ToFileTimeUtc();
