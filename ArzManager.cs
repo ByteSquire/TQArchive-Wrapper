@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -60,22 +61,50 @@ namespace TQArchive_Wrapper
         {
             foreach (var str in reader.GetStringList())
             {
-                mappedStrings.Add(str, stringList.Count);
-                stringList.Add(str);
+                try
+                {
+                    mappedStrings.Add(str, stringList.Count);
+                    stringList.Add(str);
+                }
+                catch (ArgumentException e)
+                {
+                    logger?.LogError(e, "Failed to map string");
+                }
             }
             foreach (var fileInfo in reader.GetDBRFileInfos())
             {
-                fileInfoList.Add(fileInfo);
-                mappedFileInfos.Add(stringList[fileInfo.NameID], fileInfo);
+                try
+                {
+                    mappedFileInfos.Add(stringList[fileInfo.NameID], fileInfo);
+                    fileInfoList.Add(fileInfo);
+                }
+                catch (ArgumentException e)
+                {
+                    logger?.LogError(e, "Failed to map file");
+                }
             }
 
             foreach (var fileInfo in fileInfoList)
             {
-                var compressedDataStream = reader.GetCompressedFileStream(fileInfo);
-                var decompressedDataStream = reader.GetDecompressedFileStream(fileInfo);
-                var fileName = stringList[fileInfo.NameID];
-                compressedFiles.Add(fileInfo, compressedDataStream);
-                mappedFiles.Add(fileName, reader.ReadDBRFile(decompressedDataStream, fileName));
+                try
+                {
+                    var fileName = stringList[fileInfo.NameID];
+                    try
+                    {
+                        var compressedDataStream = reader.GetCompressedFileStream(fileInfo);
+                        var decompressedDataStream = reader.GetDecompressedFileStream(fileInfo);
+                        compressedFiles.Add(fileInfo, compressedDataStream);
+                        mappedFiles.Add(fileName, reader.ReadDBRFile(decompressedDataStream, fileName));
+                    }
+                    catch (Exception e)
+                    {
+                        logger?.LogError(e, "Failed to read compressed file {fileName}", fileName);
+                    }
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    logger?.LogError("Failed to read compressed file, filename missing in stringlist");
+                }
             }
 
             needsWriting = false;
@@ -95,7 +124,7 @@ namespace TQArchive_Wrapper
             }
         }
 
-        public void AddOrUpdateFile(string filePath, Func<DBRFile> file)
+        public static void AddOrUpdateFile(string filePath, string baseDir, ConcurrentDictionary<string, DBRFileInfo> mappedFileInfos, ConcurrentDictionary<DBRFileInfo, MemoryStream> compressedFiles, LockableDictionary<string, int> mappedStrings, ConcurrentDictionary<string, RawDBRFile> mappedFiles, ConcurrentBag<string> stringList, Action fileDone, Func<DBRFile> file, ILogger? logger = null)
         {
             string message = "added";
             var relPath = Path.GetRelativePath(baseDir, filePath).ToLowerInvariant();
@@ -104,11 +133,11 @@ namespace TQArchive_Wrapper
                 if (existingInfo.TimeStamp >= File.GetLastWriteTimeUtc(filePath).ToFileTimeUtc())
                 {
                     //logger?.LogWarning("File {path} has been skipped (Newer in archive)");
-                    FileDone?.Invoke();
+                    fileDone?.Invoke();
                     return;
                 }
 
-                compressedFiles.Remove(existingInfo);
+                compressedFiles.TryRemove(existingInfo, out var _);
                 message = "updated";
             }
             var currStringCount = mappedStrings.Count;
@@ -116,22 +145,22 @@ namespace TQArchive_Wrapper
             {
                 var dbrFile = file.Invoke();
 
-                var additionalStream = writer.WriteFileToStream(dbrFile, mappedStrings);
+                var additionalStream = ArzWriter.WriteFileToStream(dbrFile, mappedStrings, baseDir, logger);
                 var countDiff = mappedStrings.Count - currStringCount;
                 if (countDiff > 0)
                 {
-                    stringList.AddRange(mappedStrings.TakeLast(countDiff).Select(x => x.Key));
+                    foreach (var newString in mappedStrings.TakeLast(countDiff).Select(x => x.Key))
+                        stringList.Add(newString);
                 }
 
-                var (additionalInfo, compressedStream) = writer.CompressAndCreateInfo(additionalStream, mappedStrings, dbrFile);
+                var (additionalInfo, compressedStream) = ArzWriter.CompressAndCreateInfo(additionalStream, mappedStrings, baseDir, dbrFile.FilePath, dbrFile["Class"].Value);
                 mappedFileInfos[relPath] = additionalInfo;
-                compressedFiles.Add(additionalInfo, compressedStream);
+                compressedFiles.TryAdd(additionalInfo, compressedStream);
 
                 mappedFiles[relPath] = RawDBRFile.From(dbrFile);
 
                 logger?.LogInformation("File {path} has been {msg}", filePath, message);
-                FileDone?.Invoke();
-                needsWriting = true;
+                fileDone?.Invoke();
             }
             catch (Exception e)
             {
@@ -139,17 +168,78 @@ namespace TQArchive_Wrapper
             }
         }
 
-        public void SyncFiles(IEnumerable<string> filePaths, DBRParser parser)
+        private void OnFileDone()
         {
-            foreach (var filePath in filePaths)
+            needsWriting = true;
+            FileDone?.Invoke();
+        }
+
+        //public void SyncFiles(IEnumerable<string> filePaths, DBRParser parser, bool useParallel = false)
+        //{
+        //    if (useParallel)
+        //        Parallel.ForEach(filePaths, (x) => DoSync(x));
+        //    else
+        //        foreach (var filePath in filePaths)
+        //        {
+        //            DoSync(filePath);
+        //        }
+
+        //    void DoSync(string filePath)
+        //    {
+        //        AddOrUpdateFile(filePath, () => parser.ParseFile(filePath));
+        //    }
+        //}
+
+        public void SyncFiles(IEnumerable<string> filePaths, TemplateManager manager, bool useParallel = false)
+        {
+            var mappedFileInfos = new ConcurrentDictionary<string, DBRFileInfo>(this.mappedFileInfos);
+            var compressedFiles = new ConcurrentDictionary<DBRFileInfo, MemoryStream>(this.compressedFiles);
+            var mappedStrings = new LockableDictionary<string, int>(new ConcurrentDictionary<string, int>(this.mappedStrings));
+            var mappedFiles = new ConcurrentDictionary<string, RawDBRFile>(this.mappedFiles);
+            var stringList = new ConcurrentBag<string>(this.stringList);
+            if (useParallel)
+                Parallel.ForEach(filePaths, (x) => DoSync(x));
+            else
+                foreach (var filePath in filePaths)
+                {
+                    DoSync(filePath);
+                }
+
+            this.mappedFileInfos.Clear();
+            this.mappedFileInfos.AddRange(mappedFileInfos);
+            this.compressedFiles.Clear();
+            this.compressedFiles.AddRange(compressedFiles);
+            this.mappedStrings.Clear();
+            this.mappedStrings.AddRange(mappedStrings);
+            this.mappedFiles.Clear();
+            this.mappedFiles.AddRange(mappedFiles);
+            this.stringList.Clear();
+            this.stringList.AddRange(stringList);
+
+
+            void DoSync(string filePath)
             {
-                AddOrUpdateFile(filePath, () => parser.ParseFile(filePath));
+                AddOrUpdateFile(filePath, baseDir, mappedFileInfos, compressedFiles, mappedStrings, mappedFiles, stringList, OnFileDone, () => new DBRParser(manager, logger).ParseFile(filePath), logger);
             }
         }
 
-        public void SyncFiles(DBRParser parser)
+        //public void SyncFiles(DBRParser parser)
+        //{
+        //    SyncFiles(Directory.EnumerateFiles(baseDir, "*.dbr", SearchOption.AllDirectories), parser);
+        //}
+
+        public void SyncFiles(TemplateManager manager)
         {
-            SyncFiles(Directory.EnumerateFiles(baseDir, "*.dbr", SearchOption.AllDirectories), parser);
+            SyncFiles(Directory.EnumerateFiles(baseDir, "*.dbr", SearchOption.AllDirectories), manager);
+        }
+    }
+
+    public static class DictionaryExtensions
+    {
+        public static void AddRange<TKey, TValue>(this IDictionary<TKey, TValue> me, IDictionary<TKey, TValue> other)
+        {
+            foreach (var pair in other)
+                me.Add(pair.Key, pair.Value);
         }
     }
 }

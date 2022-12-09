@@ -8,9 +8,89 @@ using TQDB_Parser.DBR;
 using Microsoft.Extensions.Logging;
 using TQDB_Parser.Extensions;
 using System.Collections.Concurrent;
+using System.Collections;
 
 namespace TQArchive_Wrapper
 {
+    public struct LockableDictionary<TKey, TValue> : IDictionary<TKey, TValue>
+    {
+        private readonly IDictionary<TKey, TValue> dictionary;
+        public IDictionary<TKey, TValue> Dictionary => dictionary;
+
+        public LockableDictionary(IDictionary<TKey, TValue> dict)
+        {
+            dictionary = dict;
+        }
+
+        private readonly object syncRoot = new();
+        public object SyncRoot => syncRoot;
+
+        public ICollection<TKey> Keys => dictionary.Keys;
+
+        public ICollection<TValue> Values => dictionary.Values;
+
+        public int Count => dictionary.Count;
+
+        public bool IsReadOnly => dictionary.IsReadOnly;
+
+        public TValue this[TKey key] { get => dictionary[key]; set => dictionary[key] = value; }
+
+        public void Add(TKey key, TValue value)
+        {
+            dictionary.Add(key, value);
+        }
+
+        public bool ContainsKey(TKey key)
+        {
+            return dictionary.ContainsKey(key);
+        }
+
+        public bool Remove(TKey key)
+        {
+            return dictionary.Remove(key);
+        }
+
+        public bool TryGetValue(TKey key, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out TValue value)
+        {
+            return dictionary.TryGetValue(key, out value);
+        }
+
+        public void Add(KeyValuePair<TKey, TValue> item)
+        {
+            dictionary.Add(item);
+        }
+
+        public void Clear()
+        {
+            dictionary.Clear();
+        }
+
+        public bool Contains(KeyValuePair<TKey, TValue> item)
+        {
+            return dictionary.Contains(item);
+        }
+
+        public void CopyTo(KeyValuePair<TKey, TValue>[] array, int arrayIndex)
+        {
+            dictionary.CopyTo(array, arrayIndex);
+        }
+
+        public bool Remove(KeyValuePair<TKey, TValue> item)
+        {
+            return dictionary.Remove(item);
+        }
+
+        public IEnumerator<KeyValuePair<TKey, TValue>> GetEnumerator()
+        {
+            return dictionary.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return dictionary.GetEnumerator();
+        }
+    }
+
     public class ArzWriter
     {
         private readonly string filePath;
@@ -35,20 +115,20 @@ namespace TQArchive_Wrapper
             //var strEntries = new List<string>();
             //combinedStrings.Clear();
             IEnumerable<(DBRFileInfo, MemoryStream)> binaryEntries;
-            var strings = new Dictionary<string, int>();
+            var strings = new LockableDictionary<string, int>(new Dictionary<string, int>());
 
             if (useParallel)
             {
                 var parallelBinaryEntries = new ConcurrentBag<(DBRFileInfo, MemoryStream)>();
                 binaryEntries = parallelBinaryEntries;
-                Parallel.ForEach(files, file => parallelBinaryEntries.Add(CompressAndCreateInfo(WriteFileToStream(file, strings), strings, file)));
+                Parallel.ForEach(files, file => parallelBinaryEntries.Add(CompressAndCreateInfo(WriteFileToStream(file, strings, databasePath, logger), strings, databasePath, file.FilePath, file["Class"].Value)));
             }
             else
             {
                 var linearBinaryEntries = new List<(DBRFileInfo, MemoryStream)>();
                 binaryEntries = linearBinaryEntries;
                 foreach (var file in files)
-                    linearBinaryEntries.Add(CompressAndCreateInfo(WriteFileToStream(file, strings), strings, file));
+                    linearBinaryEntries.Add(CompressAndCreateInfo(WriteFileToStream(file, strings, databasePath, logger), strings, databasePath, file.FilePath, file["Class"].Value));
             }
 
             (var binaryValuesStream, var combinedDBREntries) = CreateArchiveStreams(binaryEntries);
@@ -164,7 +244,7 @@ namespace TQArchive_Wrapper
         //    }
         //}
 
-        public MemoryStream WriteFileToStream(DBRFile file, IDictionary<string, int> strings)
+        public static MemoryStream WriteFileToStream(DBRFile file, LockableDictionary<string, int> strings, string databasePath, ILogger? logger = null)
         {
             var fileVarsStream = new MemoryStream();
 
@@ -195,7 +275,7 @@ namespace TQArchive_Wrapper
             foreach (var entry in entries)
             {
                 // name of the variable as int index in string table
-                var stringID = AddStrGetIndexLocked(strings, entry.Name, false);
+                var stringID = AddStrGetIndex(strings, entry.Name, false);
 
                 string[] arraySplit = new string[] { entry.Value };
                 bool isArray = entry.Template.Class == TQDB_Parser.VariableClass.array;
@@ -211,12 +291,12 @@ namespace TQArchive_Wrapper
                 {
                     case TQDB_Parser.VariableType.@int:
                         typeID = 0;
-                        if (!TryGetIntValues(arraySplit, out values))
+                        if (!TryGetIntValues(arraySplit, out values, logger))
                             error = true;
                         break;
                     case TQDB_Parser.VariableType.real:
                         typeID = 1;
-                        if (!TryGetFloatValues(arraySplit, out values))
+                        if (!TryGetFloatValues(arraySplit, out values, logger))
                             error = true;
                         break;
                     case TQDB_Parser.VariableType.file:
@@ -230,7 +310,7 @@ namespace TQArchive_Wrapper
                         break;
                     case TQDB_Parser.VariableType.@bool:
                         typeID = 3;
-                        if (!TryGetIntValues(arraySplit, out values))
+                        if (!TryGetIntValues(arraySplit, out values, logger))
                             error = true;
                         break;
                 }
@@ -246,28 +326,27 @@ namespace TQArchive_Wrapper
             return fileVarsStream;
         }
 
-        public (DBRFileInfo, MemoryStream) CompressAndCreateInfo(MemoryStream stream, IDictionary<string, int> strings, DBRFile file)
+        public static (DBRFileInfo, MemoryStream) CompressAndCreateInfo(MemoryStream stream, LockableDictionary<string, int> strings, string databasePath, string filePath, string fileClass)
         {
             // compress the values using ZLib
             var myBinaryValuesStream = CompressValues(stream);
 
             // dbr file info
-            DBRFileInfo fileInfo = CreateFileInfo(file, strings, (int)myBinaryValuesStream.Length);
+            DBRFileInfo fileInfo = CreateFileInfo(databasePath, filePath, fileClass, strings, (int)myBinaryValuesStream.Length);
 
             return (fileInfo, myBinaryValuesStream);
         }
 
-        private DBRFileInfo CreateFileInfo(DBRFile file, IDictionary<string, int> strings, int length)
+        private static DBRFileInfo CreateFileInfo(string databasePath, string filePath, string fileClass, LockableDictionary<string, int> strings, int length)
         {
             // dbr file info
-            var currDBRNameID = AddStrGetIndex(strings, Path.GetRelativePath(databasePath, file.FilePath));
-            var filePath = file.FilePath;
+            var currDBRNameID = AddStrGetIndex(strings, Path.GetRelativePath(databasePath, filePath));
             // timestap for comparison
             var time = File.GetLastWriteTimeUtc(filePath).ToFileTimeUtc();
 
             var fileInfo = new DBRFileInfo
             {
-                Class = file["Class"].Value,
+                Class = fileClass,
                 NameID = currDBRNameID,
                 CompressedLength = length,
                 TimeStamp = time,
@@ -286,7 +365,7 @@ namespace TQArchive_Wrapper
             return myBinaryValuesStream;
         }
 
-        private bool TryGetFloatValues(string[] elements, out object? values)
+        private static bool TryGetFloatValues(string[] elements, out object? values, ILogger? logger = null)
         {
             var iValues = new object[elements.Length];
             for (int i = 0; i < elements.Length; i++)
@@ -305,7 +384,7 @@ namespace TQArchive_Wrapper
             return true;
         }
 
-        private bool TryGetIntValues(string[] elements, out object? values)
+        private static bool TryGetIntValues(string[] elements, out object? values, ILogger? logger = null)
         {
             var fValues = new object[elements.Length];
             for (int i = 0; i < elements.Length; i++)
@@ -362,14 +441,14 @@ namespace TQArchive_Wrapper
             }
         }
 
-        private Task<object[]> AddStrsGetIndicesAsync(IDictionary<string, int> mappedStrings, string[] strs, bool ignoreCase)
+        private static Task<object[]> AddStrsGetIndicesAsync(LockableDictionary<string, int> mappedStrings, string[] strs, bool ignoreCase)
         {
             var ret = new Task<object[]>(() => AddStrsGetIndices(mappedStrings, strs, ignoreCase));
             ret.Start();
             return ret;
         }
 
-        private object[] AddStrsGetIndices(IDictionary<string, int> mappedStrings, string[] strs, bool ignoreCase)
+        private static object[] AddStrsGetIndices(LockableDictionary<string, int> mappedStrings, string[] strs, bool ignoreCase)
         {
             // ignoreCase can save a bit of size, ArtManager is really inconsistent
             if (ignoreCase)
@@ -384,11 +463,13 @@ namespace TQArchive_Wrapper
             return ret;
         }
 
-        private int AddStrGetIndex(IDictionary<string, int> mappedStrings, string str, bool ignoreCase = true)
+        private static int AddStrGetIndex(LockableDictionary<string, int> mappedStrings, string str, bool ignoreCase = true)
         {
-            if (ignoreCase)
-                str = str.ToLowerInvariant();
+            return AddStrGetIndexLocked(mappedStrings, str, ignoreCase);
+        }
 
+        private static int AddStrGetIndexInternal(LockableDictionary<string, int> mappedStrings, string str)
+        {
             if (!mappedStrings.TryGetValue(str, out int idx))
             {
                 idx = mappedStrings.Count;
@@ -397,12 +478,15 @@ namespace TQArchive_Wrapper
             return idx;
         }
 
-        private int AddStrGetIndexLocked(IDictionary<string, int> mappedStrings, string str, bool ignoreCase = true)
+        private static int AddStrGetIndexLocked(LockableDictionary<string, int> mappedStrings, string str, bool ignoreCase = true)
         {
-            //lock (stringDictionaryLock)
-            //{
-            return AddStrGetIndex(mappedStrings, str, ignoreCase);
-            //}
+            if (ignoreCase)
+                str = str.ToLowerInvariant();
+
+            lock (mappedStrings.SyncRoot)
+            {
+                return AddStrGetIndexInternal(mappedStrings, str);
+            }
         }
 
         private static void WriteValue<T>(Stream writer, T value)

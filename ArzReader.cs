@@ -341,7 +341,7 @@ namespace TQArchive_Wrapper
             var rawEntries = ReadRawEntries(decompressedStream);
             if (!rawEntries.TryGetValue(TQDB_Parser.Constants.TemplateKey, out var templateName))
             {
-                var exc = new Exception("Missing templateName");
+                var exc = new Exception($"Missing {TQDB_Parser.Constants.TemplateKey}");
                 logger?.LogError(exc, "File {file}", fileName);
                 throw exc;
             }
