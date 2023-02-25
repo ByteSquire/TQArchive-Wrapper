@@ -14,10 +14,9 @@ namespace TQArchive_Wrapper
         private readonly List<DBRFileInfo> fileInfos;
         private readonly Dictionary<string, DBRFileInfo> mappedFileInfos;
         private readonly Dictionary<string, RawDBRFile> files;
+        private readonly int numStrings;
         private long lastStringOffset;
-        private int numStrings;
         private long lastFileInfoOffset;
-        private bool headerInitialised;
         private ArzHeader header;
 
         public ArzReader(string filePath, ILogger? logger = null)
@@ -41,10 +40,26 @@ namespace TQArchive_Wrapper
             fileInfos = new();
             mappedFileInfos = new();
             files = new();
-            headerInitialised = false;
-            lastStringOffset = 0;
-            numStrings = -1;
-            lastFileInfoOffset = 0;
+
+            using var reader = CreateReader();
+            ReadHeader(reader);
+
+            reader.BaseStream.Seek(header.StrTableStart, SeekOrigin.Begin);
+            numStrings = reader.ReadInt32();
+            lastStringOffset = reader.BaseStream.Position;
+        }
+
+        private BinaryReader CreateReader()
+        {
+            var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return new BinaryReader(stream, Constants.Encoding1252);
+        }
+
+        private BinaryReader CreateReaderAtOffset(long offset, SeekOrigin seekOrigin = SeekOrigin.Begin)
+        {
+            var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            stream.Seek(offset, seekOrigin);
+            return new BinaryReader(stream, Constants.Encoding1252);
         }
 
         private void ReadHeader(BinaryReader reader)
@@ -56,7 +71,6 @@ namespace TQArchive_Wrapper
                 lastFileInfoOffset = header.DBTableStart;
                 fileInfos.Capacity = header.DBNumEntries;
                 mappedFileInfos.EnsureCapacity(header.DBNumEntries);
-                headerInitialised = true;
             }
             catch (IOException e)
             {
@@ -65,15 +79,7 @@ namespace TQArchive_Wrapper
             }
         }
 
-        public ArzHeader GetHeader()
-        {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
-            if (!headerInitialised)
-                ReadHeader(reader);
-
-            return header;
-        }
+        public ArzHeader GetHeader() => header;
 
         public IEnumerable<string> GetStringList()
         {
@@ -88,35 +94,22 @@ namespace TQArchive_Wrapper
                     yield break;
             }
 
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
-            if (!headerInitialised)
-                ReadHeader(reader);
-
-            if (stringList.Count == 0)
-            {
-                stream.Seek(header.StrTableStart, SeekOrigin.Begin);
-                numStrings = reader.ReadInt32();
-            }
-            else
-                stream.Seek(lastStringOffset, SeekOrigin.Begin);
+            using var reader = CreateReaderAtOffset(lastStringOffset);
 
             for (int i = stringList.Count; i < numStrings; i++)
             {
-                var currStr = string.Empty;
-
-                currStr = reader.ReadCString();
+                var currStr = reader.ReadCString();
                 stringList.Add(currStr);
 
                 yield return currStr;
             }
             // should be irrelevant, stream is read to end
-            lastStringOffset = stream.Position;
+            lastStringOffset = reader.BaseStream.Position;
         }
 
         private void CheckStringID(int id)
         {
-            if (id < 0 || numStrings > -1 && id >= numStrings)
+            if (id < 0 || id >= numStrings)
             {
                 var exc = new ArgumentOutOfRangeException("ids", id, "The passed id is out of range for this archive");
                 logger?.LogError(exc, "File {file}", filePath);
@@ -147,17 +140,9 @@ namespace TQArchive_Wrapper
                 CheckStringID(id);
             }
 
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
-            if (!headerInitialised)
-                ReadHeader(reader);
+            using var reader = CreateReaderAtOffset(lastStringOffset);
 
-            stream.Seek(lastStringOffset, SeekOrigin.Begin);
-
-            if (numStrings == -1)
-                numStrings = reader.ReadInt32();
-
-            CheckStringID(id);
+            //CheckStringID(id);
             var preloadMax = Math.Min(numStrings, maxID + 6);
 
             for (int i = stringList.Count; i < preloadMax; i++)
@@ -177,7 +162,7 @@ namespace TQArchive_Wrapper
                     }
                 }
             }
-            lastStringOffset = stream.Position;
+            lastStringOffset = reader.BaseStream.Position;
         }
 
         //public string GetString(int index) => GetStrings(index).First();
@@ -190,17 +175,9 @@ namespace TQArchive_Wrapper
                 return stringList[index];
             }
 
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
-            if (!headerInitialised)
-                ReadHeader(reader);
+            using var reader = CreateReaderAtOffset(lastStringOffset);
 
-            stream.Seek(lastStringOffset, SeekOrigin.Begin);
-
-            if (numStrings == -1)
-                numStrings = reader.ReadInt32();
-
-            CheckStringID(index);
+            //CheckStringID(index);
             string ret = string.Empty;
             var preloadMax = Math.Min(numStrings, index + 6);
 
@@ -216,13 +193,13 @@ namespace TQArchive_Wrapper
                     ret = currStr;
                 }
             }
-            lastStringOffset = stream.Position;
+            lastStringOffset = reader.BaseStream.Position;
             return ret;
         }
 
         public IEnumerable<DBRFileInfo> GetDBRFileInfos()
         {
-            if (headerInitialised && fileInfos.Count > 0)
+            if (fileInfos.Count > 0)
             {
                 var dbrFileInfoEnumerator = fileInfos.GetEnumerator();
                 while (dbrFileInfoEnumerator.MoveNext())
@@ -233,12 +210,7 @@ namespace TQArchive_Wrapper
                     yield break;
             }
 
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var reader = new BinaryReader(stream, Constants.Encoding1252, true);
-            if (!headerInitialised)
-                ReadHeader(reader);
-
-            stream.Seek(lastFileInfoOffset, SeekOrigin.Begin);
+            using var reader = CreateReaderAtOffset(lastFileInfoOffset);
 
             for (int i = fileInfos.Count; i < header.DBNumEntries; i++)
             {
@@ -247,7 +219,7 @@ namespace TQArchive_Wrapper
                 //mappedFileInfos.Add(GetString(currInfo.NameID), currInfo);
                 yield return currInfo;
             }
-            lastFileInfoOffset = stream.Position;
+            lastFileInfoOffset = reader.BaseStream.Position;
         }
 
         public IEnumerable<RawDBRFile> GetFiles()
