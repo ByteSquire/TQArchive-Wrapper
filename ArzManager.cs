@@ -1,12 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Reflection.PortableExecutable;
-using System.Text;
-using System.Threading.Tasks;
 using TQDB_Parser;
 using TQDB_Parser.DBR;
 
@@ -14,8 +7,6 @@ namespace TQArchive_Wrapper
 {
     public class ArzManager
     {
-        private readonly ArzWriter writer;
-        private readonly ArzReader reader;
         private readonly string filePath;
 
         private readonly string baseDir;
@@ -26,10 +17,10 @@ namespace TQArchive_Wrapper
         private readonly List<string> stringList;
         private readonly List<DBRFileInfo> fileInfoList;
 
-        private readonly Dictionary<DBRFileInfo, MemoryStream> compressedFiles;
+        private readonly Dictionary<DBRFileInfo, Func<MemoryStream>> compressedFiles;
 
         private readonly Dictionary<string, DBRFileInfo> mappedFileInfos;
-        private readonly Dictionary<string, RawDBRFile> mappedFiles;
+        //private readonly Dictionary<string, RawDBRFile> mappedFiles;
         private readonly Dictionary<string, int> mappedStrings;
 
         public event Action? FileDone;
@@ -41,24 +32,21 @@ namespace TQArchive_Wrapper
             needsWriting = true;
             this.logger = logger;
 
-            writer = new ArzWriter(filePath, baseDir, logger);
-
             stringList = new();
 
             fileInfoList = new();
             compressedFiles = new();
 
             mappedFileInfos = new();
-            mappedFiles = new();
             mappedStrings = new();
 
-            reader = new ArzReader(filePath, logger);
-            if (new FileInfo(filePath).Length > 0)
+            if (File.Exists(filePath) && new FileInfo(filePath).Length > 0)
                 ReadArchive();
         }
 
         private void ReadArchive()
         {
+            var reader = new ArzReader(filePath, logger);
             foreach (var str in reader.GetStringList())
             {
                 try
@@ -84,28 +72,30 @@ namespace TQArchive_Wrapper
                 }
             }
 
-            foreach (var fileInfo in fileInfoList)
-            {
-                try
-                {
-                    var fileName = stringList[fileInfo.NameID];
-                    try
-                    {
-                        var compressedDataStream = reader.GetCompressedFileStream(fileInfo);
-                        var decompressedDataStream = reader.GetDecompressedFileStream(fileInfo);
-                        compressedFiles.Add(fileInfo, compressedDataStream);
-                        mappedFiles.Add(fileName, reader.ReadDBRFile(decompressedDataStream, fileName));
-                    }
-                    catch (Exception e)
-                    {
-                        logger?.LogError(e, "Failed to read compressed file {fileName}", fileName);
-                    }
-                }
-                catch (ArgumentOutOfRangeException)
-                {
-                    logger?.LogError("Failed to read compressed file, filename missing in stringlist");
-                }
-            }
+            compressedFiles.AddRange(fileInfoList.ToDictionary(x => x,
+                x => { MemoryStream ret() => reader.GetCompressedFileStream(x); return (Func<MemoryStream>)ret; }));
+            //foreach (var fileInfo in fileInfoList)
+            //{
+            //    try
+            //    {
+            //        var fileName = stringList[fileInfo.NameID];
+            //        try
+            //        {
+            //            var compressedDataStream = reader.GetCompressedFileStream(fileInfo);
+            //            var decompressedDataStream = reader.GetDecompressedFileStream(fileInfo);
+            //            compressedFiles.Add(fileInfo, compressedDataStream);
+            //            mappedFiles.Add(fileName, reader.ReadDBRFile(decompressedDataStream, fileName));
+            //        }
+            //        catch (Exception e)
+            //        {
+            //            logger?.LogError(e, "Failed to read compressed file {fileName}", fileName);
+            //        }
+            //    }
+            //    catch (ArgumentOutOfRangeException)
+            //    {
+            //        logger?.LogError("Failed to read compressed file, filename missing in stringlist");
+            //    }
+            //}
 
             needsWriting = false;
         }
@@ -114,7 +104,8 @@ namespace TQArchive_Wrapper
         {
             if (needsWriting)
             {
-                writer.Write(compressedFiles.Select(x => (x.Key, x.Value)), mappedStrings);
+                var writer = new ArzWriter(filePath, baseDir, logger);
+                writer.Write(compressedFiles.Select(x => (x.Key, x.Value())), mappedStrings);
                 needsWriting = false;
                 logger?.LogInformation("Archive {path} written successfully", filePath);
             }
@@ -124,7 +115,7 @@ namespace TQArchive_Wrapper
             }
         }
 
-        public static void AddOrUpdateFile(string filePath, string baseDir, ConcurrentDictionary<string, DBRFileInfo> mappedFileInfos, ConcurrentDictionary<DBRFileInfo, MemoryStream> compressedFiles, LockableDictionary<string, int> mappedStrings, ConcurrentDictionary<string, RawDBRFile> mappedFiles, ConcurrentBag<string> stringList, Action fileDone, Func<DBRFile> file, ILogger? logger = null)
+        public void AddOrUpdateFile(string filePath, string baseDir, ConcurrentDictionary<string, DBRFileInfo> mappedFileInfos, ConcurrentDictionary<DBRFileInfo, MemoryStream> compressedFiles, LockableDictionary<string, int> mappedStrings, ConcurrentBag<string> stringList, Action fileDone, Func<DBRFile> file, ILogger? logger = null)
         {
             string message = "added";
             var relPath = Path.GetRelativePath(baseDir, filePath).ToLowerInvariant();
@@ -137,7 +128,6 @@ namespace TQArchive_Wrapper
                     return;
                 }
 
-                compressedFiles.TryRemove(existingInfo, out var _);
                 message = "updated";
             }
             var currStringCount = mappedStrings.Count;
@@ -157,10 +147,11 @@ namespace TQArchive_Wrapper
                 mappedFileInfos[relPath] = additionalInfo;
                 compressedFiles.TryAdd(additionalInfo, compressedStream);
 
-                mappedFiles[relPath] = RawDBRFile.From(dbrFile);
+                //mappedFiles[relPath] = RawDBRFile.From(dbrFile);
 
                 logger?.LogInformation("File {path} has been {msg}", filePath, message);
                 fileDone?.Invoke();
+                needsWriting = true;
             }
             catch (Exception e)
             {
@@ -170,7 +161,6 @@ namespace TQArchive_Wrapper
 
         private void OnFileDone()
         {
-            needsWriting = true;
             FileDone?.Invoke();
         }
 
@@ -193,9 +183,9 @@ namespace TQArchive_Wrapper
         public void SyncFiles(IEnumerable<string> filePaths, TemplateManager manager, bool useParallel = false)
         {
             var mappedFileInfos = new ConcurrentDictionary<string, DBRFileInfo>(this.mappedFileInfos);
-            var compressedFiles = new ConcurrentDictionary<DBRFileInfo, MemoryStream>(this.compressedFiles);
+            var compressedFiles = new ConcurrentDictionary<DBRFileInfo, MemoryStream>();
             var mappedStrings = new LockableDictionary<string, int>(new ConcurrentDictionary<string, int>(this.mappedStrings));
-            var mappedFiles = new ConcurrentDictionary<string, RawDBRFile>(this.mappedFiles);
+            //var mappedFiles = new ConcurrentDictionary<string, RawDBRFile>(this.mappedFiles);
             var stringList = new ConcurrentBag<string>(this.stringList);
             if (useParallel)
                 Parallel.ForEach(filePaths, (x) => DoSync(x));
@@ -207,19 +197,19 @@ namespace TQArchive_Wrapper
 
             this.mappedFileInfos.Clear();
             this.mappedFileInfos.AddRange(mappedFileInfos);
-            this.compressedFiles.Clear();
-            this.compressedFiles.AddRange(compressedFiles);
+            //this.compressedFiles.Clear();
+            this.compressedFiles.AddRangeKeepBy(compressedFiles.Select(x => new KeyValuePair<DBRFileInfo, Func<MemoryStream>>(x.Key, () => x.Value)), (a, b) => a.Key.TimeStamp < b.Key.TimeStamp);
             this.mappedStrings.Clear();
             this.mappedStrings.AddRange(mappedStrings);
-            this.mappedFiles.Clear();
-            this.mappedFiles.AddRange(mappedFiles);
+            //this.mappedFiles.Clear();
+            //this.mappedFiles.AddRange(mappedFiles);
             this.stringList.Clear();
             this.stringList.AddRange(stringList);
 
 
             void DoSync(string filePath)
             {
-                AddOrUpdateFile(filePath, baseDir, mappedFileInfos, compressedFiles, mappedStrings, mappedFiles, stringList, OnFileDone, () => new DBRParser(manager, logger).ParseFile(filePath), logger);
+                AddOrUpdateFile(filePath, baseDir, mappedFileInfos, compressedFiles, mappedStrings, stringList, OnFileDone, () => new DBRParser(manager, logger).ParseFile(filePath), logger);
             }
         }
 
@@ -228,9 +218,9 @@ namespace TQArchive_Wrapper
         //    SyncFiles(Directory.EnumerateFiles(baseDir, "*.dbr", SearchOption.AllDirectories), parser);
         //}
 
-        public void SyncFiles(TemplateManager manager)
+        public void SyncFiles(TemplateManager manager, bool useParallel = false)
         {
-            SyncFiles(Directory.EnumerateFiles(baseDir, "*.dbr", SearchOption.AllDirectories), manager);
+            SyncFiles(Directory.EnumerateFiles(baseDir, "*.dbr", SearchOption.AllDirectories), manager, useParallel);
         }
     }
 
@@ -239,7 +229,18 @@ namespace TQArchive_Wrapper
         public static void AddRange<TKey, TValue>(this IDictionary<TKey, TValue> me, IDictionary<TKey, TValue> other)
         {
             foreach (var pair in other)
-                me.Add(pair.Key, pair.Value);
+                me.Add(pair);
+        }
+
+        public static void AddRangeKeepBy<TKey, TValue>(this IDictionary<TKey, TValue> me, IEnumerable<KeyValuePair<TKey, TValue>> other, Func<KeyValuePair<TKey, TValue>, KeyValuePair<TKey, TValue>, bool> shouldReplace)
+        {
+            foreach (var pair in other)
+            {
+                if (me.ContainsKey(pair.Key) && shouldReplace(new KeyValuePair<TKey, TValue>(pair.Key, me[pair.Key]), pair))
+                    me[pair.Key] = pair.Value;
+                else
+                    me.Add(pair);
+            }
         }
     }
 }
